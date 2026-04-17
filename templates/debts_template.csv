@@ -1,0 +1,4 @@
+name,kind,balance,apr,min_payment,credit_limit,due_day
+Example Credit Card,credit_card,4250.00,0.2499,105.00,10000,15
+Example Student Loan,student_loan,18500.00,0.065,220.00,,1
+Example Auto Loan,auto,12000.00,0.045,310.00,,20
