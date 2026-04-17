@@ -1,11 +1,22 @@
 #!/bin/bash
 # SessionStart hook — installs everything tests/linters/autofix need.
-# Only runs in Claude Code on the web; a no-op locally.
+# Runs ASYNC on Claude Code on the web so the session starts immediately;
+# a no-op locally.
 set -euo pipefail
 
 if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
     exit 0
 fi
+
+# Write env vars synchronously BEFORE detaching. The session inherits
+# these when it launches; async work happens in the background after.
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+    echo 'export QT_QPA_PLATFORM=offscreen' >> "$CLAUDE_ENV_FILE"
+fi
+
+# Tell the harness to run the rest of this hook in the background. Must
+# be the first stdout line of the hook.
+echo '{"async": true, "asyncTimeout": 300000}'
 
 cd "$CLAUDE_PROJECT_DIR"
 
@@ -28,8 +39,5 @@ if command -v apt-get >/dev/null 2>&1; then
         libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 \
         >/dev/null 2>&1 || echo "note: could not install Qt runtime libs (headless GUI checks may fail)"
 fi
-
-# 3) Qt needs a platform plugin; offscreen works without a display.
-echo 'export QT_QPA_PLATFORM=offscreen' >> "$CLAUDE_ENV_FILE"
 
 echo "session-start: dependencies ready"
