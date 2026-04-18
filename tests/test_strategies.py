@@ -54,6 +54,27 @@ class AvalancheVsSnowballTests(unittest.TestCase):
         self.assertLess(av.metrics["months_to_payoff"], 36)
 
 
+class NegativeAmortizationTests(unittest.TestCase):
+    def test_urgent_when_minimum_below_monthly_interest(self):
+        # $5000 at 24% APR -> ~$100/mo interest. A $50 min doesn't cover it.
+        debts = [Debt(name="runaway", kind="credit_card",
+                      balance=5000, apr=0.24, min_payment=50,
+                      credit_limit=10000)]
+        state = _state(debts, income=4000, expenses=2000)
+        result = budget_strategy.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.URGENT)
+        self.assertIn("runaway", result.summary)
+        self.assertGreaterEqual(result.metrics["underwater_debts"], 1)
+
+    def test_not_flagged_when_minimum_covers_interest(self):
+        # $5000 at 6% -> $25/mo interest. A $150 min comfortably covers it.
+        debts = [Debt(name="ok", kind="student_loan",
+                      balance=5000, apr=0.06, min_payment=150)]
+        state = _state(debts, income=4000, expenses=2000)
+        result = budget_strategy.run(state.debts, state.budget, state)
+        self.assertNotEqual(result.severity, Severity.URGENT)
+
+
 class NegativeCashflowTests(unittest.TestCase):
     def test_urgent_when_no_income(self):
         debts = [Debt(name="x", kind="credit_card", balance=1000, apr=0.25,
