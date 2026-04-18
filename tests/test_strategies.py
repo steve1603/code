@@ -2,15 +2,24 @@ import unittest
 
 from finadvisor.models import Budget, Debt, FinanceState
 from finadvisor.report import run_all
-from finadvisor.strategies import avalanche, budget as budget_strategy, consolidation, snowball, utilization
+from finadvisor.strategies import (
+    avalanche,
+    budget as budget_strategy,
+    consolidation,
+    emergency_fund,
+    snowball,
+    utilization,
+)
 from finadvisor.strategies.base import Severity
 
 
-def _state(debts, income=6000.0, expenses=3000.0, consolidation_apr=0.09):
+def _state(debts, income=6000.0, expenses=3000.0, consolidation_apr=0.09,
+           current_savings=0.0):
     return FinanceState(
         debts=debts,
         budget=Budget(monthly_income=income, monthly_expenses=expenses),
         consolidation_apr=consolidation_apr,
+        current_savings=current_savings,
     )
 
 
@@ -100,8 +109,39 @@ class ConsolidationTests(unittest.TestCase):
         self.assertEqual(result.severity, Severity.GOOD)
 
 
+class EmergencyFundTests(unittest.TestCase):
+    def test_urgent_when_high_apr_and_no_starter_fund(self):
+        debts = [Debt(name="card", kind="credit_card",
+                      balance=3000, apr=0.24, min_payment=75, credit_limit=5000)]
+        state = _state(debts, current_savings=0.0)
+        result = emergency_fund.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.URGENT)
+
+    def test_warn_when_below_starter_without_high_apr(self):
+        debts = [Debt(name="auto", kind="auto",
+                      balance=5000, apr=0.04, min_payment=150)]
+        state = _state(debts, current_savings=200.0)
+        result = emergency_fund.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.WARN)
+
+    def test_good_once_three_months_covered(self):
+        debts = [Debt(name="auto", kind="auto",
+                      balance=5000, apr=0.04, min_payment=150)]
+        # 3 * (3000 expenses + 150 min) = 9,450
+        state = _state(debts, current_savings=10_000.0)
+        result = emergency_fund.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.GOOD)
+
+    def test_fully_funded_at_six_months(self):
+        debts: list = []
+        state = _state(debts, current_savings=50_000.0)
+        result = emergency_fund.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.GOOD)
+        self.assertGreaterEqual(result.metrics["months_covered"], 6)
+
+
 class ReportTests(unittest.TestCase):
-    def test_run_all_produces_five_results(self):
+    def test_run_all_produces_six_results(self):
         debts = [
             Debt(name="Card", kind="credit_card",
                  balance=4000, apr=0.25, min_payment=100, credit_limit=5000),
@@ -110,7 +150,7 @@ class ReportTests(unittest.TestCase):
         ]
         state = _state(debts)
         report = run_all(state)
-        self.assertEqual(len(report.results), 5)
+        self.assertEqual(len(report.results), 6)
         self.assertTrue(report.next_best_action)
 
     def test_empty_state_has_action(self):

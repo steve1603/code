@@ -116,12 +116,20 @@ class FinanceState:
     debts: list[Debt] = field(default_factory=list)
     budget: Budget = field(default_factory=Budget)
     consolidation_apr: float = 0.09  # configurable assumption for recommendations
+    current_savings: float = 0.0  # liquid emergency fund balance
+
+    def __post_init__(self) -> None:
+        if self.current_savings < 0:
+            raise ValueError(
+                f"current_savings cannot be negative (got {self.current_savings})."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "debts": [d.to_dict() for d in self.debts],
             "budget": self.budget.to_dict(),
             "consolidation_apr": self.consolidation_apr,
+            "current_savings": self.current_savings,
         }
 
     @classmethod
@@ -130,6 +138,7 @@ class FinanceState:
             debts=[Debt.from_dict(x) for x in d.get("debts", [])],
             budget=Budget.from_dict(d.get("budget", {})),
             consolidation_apr=float(d.get("consolidation_apr", 0.09)),
+            current_savings=float(d.get("current_savings", 0.0)),
         )
 
     def total_debt(self) -> float:

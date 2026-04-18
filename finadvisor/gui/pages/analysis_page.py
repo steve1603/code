@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -117,12 +119,69 @@ def _build_strategy_tab(r: StrategyResult) -> QWidget:
         layout.addWidget(recs, 1)
 
     if r.schedule:
+        chart_title = QLabel("Payoff curve")
+        chart_title.setObjectName("sectionTitle")
+        layout.addWidget(chart_title)
+        layout.addWidget(_build_payoff_chart(r.schedule), 1)
+
         sched_title = QLabel("Projected balances over time")
         sched_title.setObjectName("sectionTitle")
         layout.addWidget(sched_title)
         layout.addWidget(_build_schedule_table(r.schedule))
 
     return tab
+
+
+def _build_payoff_chart(schedule: list[dict]) -> QChartView:
+    """Line chart of total balance over time, plus one line per debt."""
+    chart = QChart()
+    chart.setTitle("Projected total balance (and per-debt breakdown)")
+    chart.legend().setVisible(True)
+    chart.legend().setAlignment(Qt.AlignBottom)
+
+    months = [row["month"] for row in schedule]
+    max_month = max(months) if months else 1
+
+    total_series = QLineSeries()
+    total_series.setName("Total balance")
+    max_balance = 0.0
+    for row in schedule:
+        total = float(row.get("total_balance", 0.0))
+        total_series.append(row["month"], total)
+        if total > max_balance:
+            max_balance = total
+    chart.addSeries(total_series)
+
+    debt_names = sorted({
+        name for row in schedule for name in row.get("per_debt", {}).keys()
+    })
+    for name in debt_names:
+        s = QLineSeries()
+        s.setName(name)
+        for row in schedule:
+            s.append(row["month"], float(row.get("per_debt", {}).get(name, 0.0)))
+        chart.addSeries(s)
+
+    axis_x = QValueAxis()
+    axis_x.setTitleText("Month")
+    axis_x.setRange(0, max(max_month, 1))
+    axis_x.setLabelFormat("%d")
+    chart.addAxis(axis_x, Qt.AlignBottom)
+
+    axis_y = QValueAxis()
+    axis_y.setTitleText("Balance ($)")
+    axis_y.setRange(0, max(max_balance * 1.05, 1.0))
+    axis_y.setLabelFormat("$%,.0f")
+    chart.addAxis(axis_y, Qt.AlignLeft)
+
+    for series in chart.series():
+        series.attachAxis(axis_x)
+        series.attachAxis(axis_y)
+
+    view = QChartView(chart)
+    view.setRenderHint(QPainter.Antialiasing)
+    view.setMinimumHeight(260)
+    return view
 
 
 def _build_schedule_table(schedule: list[dict]) -> QTableWidget:
