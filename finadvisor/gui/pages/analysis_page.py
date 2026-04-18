@@ -12,11 +12,13 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QListWidget,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -187,11 +189,18 @@ def _build_strategy_tab(r: StrategyResult) -> QWidget:
         layout.addWidget(recs_title)
 
         recs = QListWidget()
-        for rec in r.recommendations:
-            recs.addItem("• " + rec)
-        recs.setSelectionMode(QAbstractItemView.NoSelection)
+        recs.setTextElideMode(Qt.ElideNone)
         recs.setWordWrap(True)
+        recs.setSelectionMode(QAbstractItemView.NoSelection)
+        for rec in r.recommendations:
+            recs.addItem("• " + _strip_markdown(rec))
         layout.addWidget(recs, 1)
+
+    if r.breakdown:
+        breakdown_title = QLabel("Per-item breakdown")
+        breakdown_title.setObjectName("sectionTitle")
+        layout.addWidget(breakdown_title)
+        layout.addWidget(_build_breakdown(r.breakdown))
 
     if r.schedule:
         chart_title = QLabel("Payoff curve")
@@ -205,6 +214,53 @@ def _build_strategy_tab(r: StrategyResult) -> QWidget:
         layout.addWidget(_build_schedule_table(r.schedule))
 
     return tab
+
+
+_BAR_COLORS = {
+    "urgent": "#dc2626",
+    "warn": "#d97706",
+    "good": "#059669",
+    "info": "#2563eb",
+}
+
+
+def _build_breakdown(items: list[dict]) -> QWidget:
+    frame = QFrame()
+    frame.setObjectName("card")
+    vb = QVBoxLayout(frame)
+    vb.setContentsMargins(12, 12, 12, 12)
+    vb.setSpacing(8)
+    for item in items:
+        row = QVBoxLayout()
+        row.setSpacing(2)
+        header = QLabel(
+            f"<b>{item['label']}</b> — {item.get('caption', '')}"
+        )
+        header.setTextFormat(Qt.RichText)
+        row.addWidget(header)
+
+        bar = QProgressBar()
+        bar.setRange(0, int(item.get("max", 100)))
+        bar.setValue(int(min(item["value"], item.get("max", 100))))
+        bar.setTextVisible(False)
+        bar.setFixedHeight(10)
+        color = _BAR_COLORS.get(item.get("severity", "info"), "#2563eb")
+        bar.setStyleSheet(
+            f"QProgressBar {{ background-color: #e5e7eb; border: none; "
+            f"border-radius: 4px; }} "
+            f"QProgressBar::chunk {{ background-color: {color}; "
+            f"border-radius: 4px; }}"
+        )
+        row.addWidget(bar)
+        vb.addLayout(row)
+    return frame
+
+
+def _strip_markdown(text: str) -> str:
+    """QListWidget rows are plain text — drop **bold** asterisks so they
+    don't render as literal glyphs."""
+    import re
+    return re.sub(r"\*\*(.+?)\*\*", r"\1", text)
 
 
 def _build_payoff_chart(schedule: list[dict]) -> QChartView:
