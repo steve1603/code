@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -92,6 +93,19 @@ class DebtsPage(QWidget):
         self.btn_import_csv.clicked.connect(self._on_import_csv)
         self.btn_import_pdf.clicked.connect(self._on_import_pdf)
         self.btn_export.clicked.connect(self._on_export)
+
+        # Keyboard shortcuts
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self._on_add)
+        QShortcut(QKeySequence("Ctrl+I"), self, activated=self._on_import_csv)
+        QShortcut(QKeySequence("Ctrl+Shift+I"), self, activated=self._on_import_pdf)
+        QShortcut(QKeySequence(Qt.Key_Delete), self.table, activated=self._on_delete)
+        QShortcut(QKeySequence("Return"), self.table, activated=self._on_edit)
+
+        self.btn_add.setToolTip("Add a debt (Ctrl+N)")
+        self.btn_import_csv.setToolTip("Import CSV (Ctrl+I)")
+        self.btn_import_pdf.setToolTip("Import PDF (Ctrl+Shift+I)")
+        self.btn_delete.setToolTip("Delete selected (Del)")
+        self.btn_edit.setToolTip("Edit selected (Enter)")
 
         self._update_summary()
 

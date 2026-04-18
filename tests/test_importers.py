@@ -37,6 +37,30 @@ class CSVImporterTests(unittest.TestCase):
         with self.assertRaises(csv_importer.CSVImportError):
             csv_importer.parse(path)
 
+    def test_kind_inferred_when_missing(self):
+        # kind column present but blank → inferred from name
+        path = self._write(
+            "name,kind,balance,apr,min_payment,credit_limit,due_day\n"
+            "Chase Visa,,4500,0.20,100,5000,15\n"
+            "Toyota Auto Loan,,12000,0.045,300,,20\n"
+            "My Student Loan,,18000,0.065,220,,1\n"
+            "Random Thing,,500,0.1,25,,1\n"
+        )
+        debts = csv_importer.parse(path)
+        self.assertEqual(debts[0].kind, "credit_card")
+        self.assertEqual(debts[1].kind, "auto")
+        self.assertEqual(debts[2].kind, "student_loan")
+        self.assertEqual(debts[3].kind, "other")
+
+    def test_kind_column_optional(self):
+        # Users can omit the column entirely
+        path = self._write(
+            "name,balance,apr,min_payment\n"
+            "My Mortgage,250000,0.035,1600\n"
+        )
+        debts = csv_importer.parse(path)
+        self.assertEqual(debts[0].kind, "mortgage")
+
     def test_bad_row_reports_line_number(self):
         path = self._write(
             "name,kind,balance,apr,min_payment,credit_limit,due_day\n"
