@@ -7,6 +7,7 @@ from finadvisor.strategies import (
     budget as budget_strategy,
     consolidation,
     emergency_fund,
+    long_term,
     snowball,
     utilization,
 )
@@ -161,8 +162,32 @@ class EmergencyFundTests(unittest.TestCase):
         self.assertGreaterEqual(result.metrics["months_covered"], 6)
 
 
+class LongTermTests(unittest.TestCase):
+    def test_stage_1_when_no_starter_fund(self):
+        debts = [Debt(name="card", kind="credit_card",
+                      balance=500, apr=0.18, min_payment=25, credit_limit=5000)]
+        state = _state(debts, current_savings=0.0)
+        result = long_term.run(state.debts, state.budget, state)
+        self.assertEqual(result.metrics["stage"], 1.0)
+
+    def test_stage_2_with_starter_fund_and_high_apr(self):
+        debts = [Debt(name="card", kind="credit_card",
+                      balance=3000, apr=0.24, min_payment=75, credit_limit=5000)]
+        state = _state(debts, current_savings=1500.0)
+        result = long_term.run(state.debts, state.budget, state)
+        self.assertEqual(result.metrics["stage"], 2.0)
+
+    def test_stage_4_when_fully_funded_and_no_high_apr(self):
+        debts = [Debt(name="mortgage", kind="mortgage",
+                      balance=100000, apr=0.035, min_payment=600)]
+        state = _state(debts, current_savings=50000.0)
+        result = long_term.run(state.debts, state.budget, state)
+        self.assertEqual(result.metrics["stage"], 4.0)
+        self.assertEqual(result.severity, Severity.GOOD)
+
+
 class ReportTests(unittest.TestCase):
-    def test_run_all_produces_six_results(self):
+    def test_run_all_produces_seven_results(self):
         debts = [
             Debt(name="Card", kind="credit_card",
                  balance=4000, apr=0.25, min_payment=100, credit_limit=5000),
@@ -171,7 +196,7 @@ class ReportTests(unittest.TestCase):
         ]
         state = _state(debts)
         report = run_all(state)
-        self.assertEqual(len(report.results), 6)
+        self.assertEqual(len(report.results), 7)
         self.assertTrue(report.next_best_action)
 
     def test_empty_state_has_action(self):

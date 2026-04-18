@@ -9,6 +9,7 @@ from finadvisor.strategies import (
     budget,
     consolidation,
     emergency_fund,
+    long_term,
     snowball,
     utilization,
 )
@@ -22,6 +23,7 @@ STRATEGY_MODULES = [
     budget,
     utilization,
     emergency_fund,
+    long_term,
 ]
 
 _SEVERITY_RANK = {
