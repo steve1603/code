@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from dataclasses import replace
+
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from finadvisor.models import Budget
 from finadvisor.report import run_all, to_text
 from finadvisor.strategies.base import StrategyResult
 
@@ -40,6 +44,20 @@ class AnalysisPage(QWidget):
         title.setObjectName("pageTitle")
         title_row.addWidget(title)
         title_row.addStretch(1)
+
+        whatif_label = QLabel("What-if: extra $/month")
+        self.whatif_input = QDoubleSpinBox()
+        self.whatif_input.setRange(0.0, 100_000.0)
+        self.whatif_input.setDecimals(0)
+        self.whatif_input.setSingleStep(50)
+        self.whatif_input.setValue(0)
+        self.whatif_input.setToolTip(
+            "Simulate adding this much extra payment every month, on top of "
+            "your current surplus."
+        )
+        title_row.addWidget(whatif_label)
+        title_row.addWidget(self.whatif_input)
+
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setObjectName("secondary")
         self.export_btn = QPushButton("Export Report…")
@@ -56,11 +74,18 @@ class AnalysisPage(QWidget):
         disclaimer.setWordWrap(True)
         root.addWidget(disclaimer)
 
+        self.whatif_banner = QLabel()
+        self.whatif_banner.setWordWrap(True)
+        self.whatif_banner.setProperty("severity", "good")
+        self.whatif_banner.hide()
+        root.addWidget(self.whatif_banner)
+
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
 
         self.refresh_btn.clicked.connect(self.refresh)
         self.export_btn.clicked.connect(self._on_export)
+        self.whatif_input.valueChanged.connect(self.refresh)
 
         self.refresh()
 
@@ -69,6 +94,7 @@ class AnalysisPage(QWidget):
         self.tabs.clear()
         state = self.window_.state
         if not state.debts:
+            self.whatif_banner.hide()
             empty = QLabel(
                 "Add at least one debt on the Debts tab to see recommendations."
             )
@@ -77,9 +103,58 @@ class AnalysisPage(QWidget):
             self.tabs.addTab(empty, "Start here")
             return
 
-        self._report = run_all(state)
+        extra = self.whatif_input.value()
+        # Always compute the baseline report (used both for the main display
+        # when extra == 0 and as a delta reference when extra > 0).
+        baseline = run_all(state)
+
+        if extra > 0:
+            # Model the extra payment as additional income so every strategy's
+            # extra_payment_capacity picks it up uniformly.
+            boosted_budget = Budget(
+                monthly_income=state.budget.monthly_income + extra,
+                monthly_expenses=state.budget.monthly_expenses,
+            )
+            boosted_state = replace(state, budget=boosted_budget)
+            self._report = run_all(boosted_state)
+            self._update_whatif_banner(extra, baseline, self._report)
+        else:
+            self._report = baseline
+            self.whatif_banner.hide()
+
         for result in self._report.results:
             self.tabs.addTab(_build_strategy_tab(result), result.title)
+
+    def _update_whatif_banner(self, extra: float, baseline, boosted) -> None:
+        def _avalanche(report):
+            return next(
+                (r for r in report.results if r.title.startswith("Avalanche")),
+                None,
+            )
+        base_av = _avalanche(baseline)
+        new_av = _avalanche(boosted)
+        if not (base_av and new_av):
+            self.whatif_banner.hide()
+            return
+        base_months = base_av.metrics.get("months_to_payoff", 0)
+        new_months = new_av.metrics.get("months_to_payoff", 0)
+        base_interest = base_av.metrics.get("total_interest", 0.0)
+        new_interest = new_av.metrics.get("total_interest", 0.0)
+        months_saved = max(0, int(base_months) - int(new_months))
+        interest_saved = max(0.0, base_interest - new_interest)
+        month_word = "month" if months_saved == 1 else "months"
+        if months_saved == 0 and interest_saved < 1:
+            self.whatif_banner.setText(
+                f"What-if: extra ${extra:,.0f}/month — no measurable change "
+                f"yet. Try a larger amount."
+            )
+        else:
+            self.whatif_banner.setText(
+                f"What-if: sending an extra ${extra:,.0f}/month under Avalanche "
+                f"finishes {months_saved} {month_word} sooner and saves "
+                f"${interest_saved:,.2f} in interest."
+            )
+        self.whatif_banner.show()
 
     def _on_export(self) -> None:
         if not hasattr(self, "_report"):
