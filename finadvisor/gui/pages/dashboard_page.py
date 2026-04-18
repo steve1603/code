@@ -55,10 +55,14 @@ class DashboardPage(QWidget):
         self.card_apr = _Card("Weighted APR")
         self.card_dti = _Card("Debt-to-income")
         self.card_payoff = _Card("Avalanche payoff")
+        self.card_emergency = _Card("Emergency fund")
+        self.card_savings = _Card("Interest saved vs. Snowball")
         grid.addWidget(self.card_total, 0, 0)
         grid.addWidget(self.card_apr, 0, 1)
-        grid.addWidget(self.card_dti, 1, 0)
-        grid.addWidget(self.card_payoff, 1, 1)
+        grid.addWidget(self.card_dti, 0, 2)
+        grid.addWidget(self.card_payoff, 1, 0)
+        grid.addWidget(self.card_emergency, 1, 1)
+        grid.addWidget(self.card_savings, 1, 2)
         root.addLayout(grid)
 
         tip = QLabel(
@@ -83,6 +87,8 @@ class DashboardPage(QWidget):
             self.card_apr.set_value("—")
             self.card_dti.set_value("—")
             self.card_payoff.set_value("—")
+            self.card_emergency.set_value(f"${state.current_savings:,.0f}")
+            self.card_savings.set_value("—")
             return
 
         report = run_all(state)
@@ -98,7 +104,6 @@ class DashboardPage(QWidget):
         else:
             self.card_dti.set_value("set budget")
 
-        # Pull payoff months from the avalanche result.
         avalanche_r = next(
             (r for r in report.results if r.title.startswith("Avalanche")),
             None,
@@ -112,3 +117,31 @@ class DashboardPage(QWidget):
             self.card_payoff.set_value(text)
         else:
             self.card_payoff.set_value("—")
+
+        emergency_r = next(
+            (r for r in report.results if r.title == "Emergency fund"), None,
+        )
+        if emergency_r:
+            months_covered = emergency_r.metrics.get("months_covered", 0.0)
+            label = f"${state.current_savings:,.0f}"
+            if months_covered > 0:
+                label += f"  ({months_covered:.1f} mo)"
+            self.card_emergency.set_value(label)
+        else:
+            self.card_emergency.set_value(f"${state.current_savings:,.0f}")
+
+        snowball_r = next(
+            (r for r in report.results if r.title.startswith("Snowball")), None,
+        )
+        if (
+            avalanche_r and snowball_r
+            and "total_interest" in avalanche_r.metrics
+            and "total_interest" in snowball_r.metrics
+        ):
+            delta = (
+                snowball_r.metrics["total_interest"]
+                - avalanche_r.metrics["total_interest"]
+            )
+            self.card_savings.set_value(f"${max(delta, 0):,.0f}")
+        else:
+            self.card_savings.set_value("—")

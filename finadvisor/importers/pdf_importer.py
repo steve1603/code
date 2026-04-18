@@ -36,22 +36,52 @@ BALANCE_PATTERNS = [
     re.compile(r"statement\s+balance[:\s]+" + _MONEY, re.IGNORECASE),
     re.compile(r"current\s+balance[:\s]+" + _MONEY, re.IGNORECASE),
     re.compile(r"outstanding\s+balance[:\s]+" + _MONEY, re.IGNORECASE),
+    re.compile(r"unpaid\s+principal(?:\s+balance)?[:\s]+" + _MONEY, re.IGNORECASE),
     re.compile(r"principal\s+balance[:\s]+" + _MONEY, re.IGNORECASE),
+    re.compile(r"remaining\s+balance[:\s]+" + _MONEY, re.IGNORECASE),
+    re.compile(r"payoff\s+amount[:\s]+" + _MONEY, re.IGNORECASE),
     re.compile(r"\bbalance[:\s]+" + _MONEY, re.IGNORECASE),
 ]
 APR_PATTERNS = [
     re.compile(r"purchase\s+apr[:\s]+" + _PERCENT, re.IGNORECASE),
     re.compile(r"\bapr[:\s]+" + _PERCENT, re.IGNORECASE),
+    re.compile(r"annual\s+percentage\s+rate[:\s]+" + _PERCENT, re.IGNORECASE),
     re.compile(r"interest\s+rate[:\s]+" + _PERCENT, re.IGNORECASE),
+    re.compile(r"note\s+rate[:\s]+" + _PERCENT, re.IGNORECASE),
 ]
 MIN_PAYMENT_PATTERNS = [
     re.compile(r"minimum\s+payment(?:\s+due)?[:\s]+" + _MONEY, re.IGNORECASE),
     re.compile(r"minimum\s+due[:\s]+" + _MONEY, re.IGNORECASE),
+    re.compile(r"monthly\s+payment(?:\s+amount)?[:\s]+" + _MONEY, re.IGNORECASE),
+    re.compile(r"regular\s+payment[:\s]+" + _MONEY, re.IGNORECASE),
     re.compile(r"amount\s+due[:\s]+" + _MONEY, re.IGNORECASE),
 ]
 CREDIT_LIMIT_PATTERNS = [
     re.compile(r"credit\s+limit[:\s]+" + _MONEY, re.IGNORECASE),
     re.compile(r"total\s+credit\s+line[:\s]+" + _MONEY, re.IGNORECASE),
+    re.compile(r"credit\s+line[:\s]+" + _MONEY, re.IGNORECASE),
+]
+
+# Text signals used to classify the debt kind. Checked in order; the first
+# matching kind wins. "credit_card" is the default when we find credit-card
+# signals, "other" when we find nothing at all.
+_KIND_SIGNALS = [
+    ("mortgage", re.compile(
+        r"\b(mortgage|escrow|home\s+loan|heloc)\b", re.IGNORECASE)),
+    ("auto", re.compile(
+        r"\b(auto\s+loan|vehicle\s+loan|car\s+loan|vin|odometer)\b",
+        re.IGNORECASE)),
+    ("student_loan", re.compile(
+        r"\b(student\s+loan|federal\s+loan|stafford|sallie\s+mae|"
+        r"nelnet|great\s+lakes|loan\s+servicer|direct\s+loan)\b",
+        re.IGNORECASE)),
+    ("personal", re.compile(
+        r"\b(personal\s+loan|installment\s+loan|unsecured\s+loan)\b",
+        re.IGNORECASE)),
+    ("credit_card", re.compile(
+        r"\b(credit\s+card|statement\s+balance|credit\s+limit|"
+        r"minimum\s+payment\s+due|purchase\s+apr|cash\s+advance\s+apr)\b",
+        re.IGNORECASE)),
 ]
 
 
@@ -103,18 +133,39 @@ def _extract_text(path: Path) -> str:
     return "\n".join(pages)
 
 
+def _guess_kind(text: str) -> str:
+    for kind, pattern in _KIND_SIGNALS:
+        if pattern.search(text):
+            return kind
+    return "other"
+
+
+def extract_from_text(text: str, suggested_name: str) -> PDFExtraction:
+    """Run heuristics against already-extracted text. Exposed for tests."""
+    kind = _guess_kind(text)
+    credit_limit = (
+        _money(_first(CREDIT_LIMIT_PATTERNS, text))
+        if kind == "credit_card"
+        else None
+    )
+    return PDFExtraction(
+        suggested_name=suggested_name,
+        raw_text=text,
+        balance=_money(_first(BALANCE_PATTERNS, text)),
+        apr=_percent_to_decimal(_first(APR_PATTERNS, text)),
+        min_payment=_money(_first(MIN_PAYMENT_PATTERNS, text)),
+        credit_limit=credit_limit,
+        guessed_kind=kind,
+    )
+
+
 def parse(path: Path | str) -> PDFExtraction:
     p = Path(path)
     if not p.exists():
         raise PDFImportError(f"File not found: {p}")
 
     text = _extract_text(p)
-    return PDFExtraction(
-        suggested_name=p.stem.replace("_", " ").replace("-", " ").strip() or "Imported debt",
-        raw_text=text,
-        balance=_money(_first(BALANCE_PATTERNS, text)),
-        apr=_percent_to_decimal(_first(APR_PATTERNS, text)),
-        min_payment=_money(_first(MIN_PAYMENT_PATTERNS, text)),
-        credit_limit=_money(_first(CREDIT_LIMIT_PATTERNS, text)),
-        guessed_kind="credit_card",
+    suggested_name = (
+        p.stem.replace("_", " ").replace("-", " ").strip() or "Imported debt"
     )
+    return extract_from_text(text, suggested_name)
