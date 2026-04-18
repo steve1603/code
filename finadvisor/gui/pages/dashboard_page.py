@@ -1,6 +1,8 @@
 """Dashboard: at-a-glance totals + 'Next best action'."""
 from __future__ import annotations
 
+from datetime import date
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
@@ -11,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from finadvisor.report import run_all
+from finadvisor.strategies._simulate import MAX_MONTHS
 
 
 class _Card(QFrame):
@@ -110,11 +113,19 @@ class DashboardPage(QWidget):
         )
         if avalanche_r and avalanche_r.metrics.get("months_to_payoff"):
             months = int(avalanche_r.metrics["months_to_payoff"])
-            y, m = divmod(months, 12)
-            text = (
-                f"{y}y {m}m" if y and m else f"{y}y" if y else f"{m}m"
-            )
-            self.card_payoff.set_value(text)
+            if months >= MAX_MONTHS:
+                self.card_payoff.set_value("never at current rate")
+            else:
+                y, m = divmod(months, 12)
+                duration = (
+                    f"{y}y {m}m" if y and m else f"{y}y" if y else f"{m}m"
+                )
+                today = date.today()
+                # Approximate calendar math: add months exactly.
+                year = today.year + (today.month - 1 + months) // 12
+                month = (today.month - 1 + months) % 12 + 1
+                free_by = date(year, month, 1).strftime("%b %Y")
+                self.card_payoff.set_value(f"{duration}  (by {free_by})")
         else:
             self.card_payoff.set_value("—")
 
