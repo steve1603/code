@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+from datetime import date
 from typing import Any
 
 
@@ -11,6 +12,31 @@ DEBT_KINDS = (
     "auto",
     "mortgage",
     "personal",
+    "other",
+)
+
+
+# Spending categories are a closed set so the UI can render consistent
+# colors and the trend view can diff them across months.
+SPENDING_CATEGORIES = (
+    "income",
+    "transfer",
+    "debt_payment",
+    "groceries",
+    "dining",
+    "gas",
+    "auto",
+    "shopping",
+    "home",
+    "utilities",
+    "phone_internet",
+    "insurance",
+    "healthcare",
+    "entertainment",
+    "subscriptions",
+    "travel",
+    "fees",
+    "cash",
     "other",
 )
 
@@ -110,13 +136,100 @@ class Budget:
 
 
 @dataclass
+class Account:
+    """A bank / credit-card account that transactions are posted to.
+
+    `name` is what the user sees (e.g. "USAA Checking 3904"). `kind`
+    drives sign interpretation: for checking/savings a positive amount
+    is a deposit, for credit_card a positive amount is a payment.
+    """
+
+    name: str
+    kind: str = "checking"  # "checking" | "savings" | "credit_card"
+    institution: str = ""
+    number_hint: str = ""   # last-4 or truncated number for display only
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Account":
+        return cls(
+            name=d["name"],
+            kind=d.get("kind", "checking"),
+            institution=d.get("institution", ""),
+            number_hint=d.get("number_hint", ""),
+        )
+
+
+@dataclass
+class Transaction:
+    """A single posted line from a statement.
+
+    `amount` follows an income-positive convention: deposits and
+    credits are positive, debits/purchases are negative. `date` is
+    stored as ISO YYYY-MM-DD so month grouping is trivial.
+    """
+
+    date: str          # ISO "YYYY-MM-DD"
+    account: str       # matches Account.name
+    description: str
+    amount: float      # signed: + = money in, - = money out
+    category: str = "other"
+    source: str = ""   # filename or "pasted"
+    note: str = ""     # optional user annotation
+
+    def __post_init__(self) -> None:
+        if self.category not in SPENDING_CATEGORIES:
+            raise ValueError(
+                f"Unknown category {self.category!r}. "
+                f"Must be one of: {', '.join(SPENDING_CATEGORIES)}."
+            )
+        # Sanity-check the date but don't mutate — callers pass ISO.
+        try:
+            date.fromisoformat(self.date)
+        except ValueError as e:
+            raise ValueError(f"Transaction date must be ISO YYYY-MM-DD: {e}")
+
+    @property
+    def month(self) -> str:
+        """e.g. '2026-02' — useful for grouping."""
+        return self.date[:7]
+
+    @property
+    def is_expense(self) -> bool:
+        return self.amount < 0
+
+    @property
+    def is_income(self) -> bool:
+        return self.amount > 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Transaction":
+        return cls(
+            date=d["date"],
+            account=d["account"],
+            description=d.get("description", ""),
+            amount=float(d["amount"]),
+            category=d.get("category", "other"),
+            source=d.get("source", ""),
+            note=d.get("note", ""),
+        )
+
+
+@dataclass
 class FinanceState:
-    """The complete persisted state: all debts plus a single budget."""
+    """The complete persisted state: debts, budget, accounts, transactions."""
 
     debts: list[Debt] = field(default_factory=list)
     budget: Budget = field(default_factory=Budget)
     consolidation_apr: float = 0.09  # configurable assumption for recommendations
     current_savings: float = 0.0  # liquid emergency fund balance
+    accounts: list[Account] = field(default_factory=list)
+    transactions: list[Transaction] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.current_savings < 0:
@@ -130,6 +243,8 @@ class FinanceState:
             "budget": self.budget.to_dict(),
             "consolidation_apr": self.consolidation_apr,
             "current_savings": self.current_savings,
+            "accounts": [a.to_dict() for a in self.accounts],
+            "transactions": [t.to_dict() for t in self.transactions],
         }
 
     @classmethod
@@ -139,6 +254,10 @@ class FinanceState:
             budget=Budget.from_dict(d.get("budget", {})),
             consolidation_apr=float(d.get("consolidation_apr", 0.09)),
             current_savings=float(d.get("current_savings", 0.0)),
+            accounts=[Account.from_dict(x) for x in d.get("accounts", [])],
+            transactions=[
+                Transaction.from_dict(x) for x in d.get("transactions", [])
+            ],
         )
 
     def total_debt(self) -> float:
@@ -149,3 +268,30 @@ class FinanceState:
         if total <= 0:
             return 0.0
         return sum(d.balance * d.apr for d in self.debts) / total
+
+    def upsert_account(self, account: Account) -> None:
+        """Add an account, or update the record if one by the same name
+        already exists. Idempotent so repeated imports don't duplicate."""
+        for i, existing in enumerate(self.accounts):
+            if existing.name == account.name:
+                self.accounts[i] = account
+                return
+        self.accounts.append(account)
+
+    def add_transactions(self, txs: list[Transaction]) -> int:
+        """Append transactions, skipping any (date, account, amount,
+        description) duplicates of rows already on file. Returns the
+        number newly inserted."""
+        seen = {
+            (t.date, t.account, round(t.amount, 2), t.description)
+            for t in self.transactions
+        }
+        added = 0
+        for t in txs:
+            key = (t.date, t.account, round(t.amount, 2), t.description)
+            if key in seen:
+                continue
+            self.transactions.append(t)
+            seen.add(key)
+            added += 1
+        return added
