@@ -336,10 +336,15 @@ def make_handler(store_path: Path):
                             state.transactions, summaries[-1].month
                         ) if summaries else {}
                     )
+                    breakdown = (
+                        spending_module.account_category_breakdown(
+                            state.transactions, summaries[-1].month
+                        ) if summaries else {}
+                    )
                     return self._html(
                         templates.render_spending(
                             state, summaries, insights, per_account,
-                            flash=flash,
+                            breakdown=breakdown, flash=flash,
                         )
                     )
                 if path == "/trends":
@@ -351,9 +356,46 @@ def make_handler(store_path: Path):
                     projected = spending_module.projected_monthly_spending(
                         state.transactions
                     )
+                    income_map = spending_module.income_by_month(
+                        state.transactions
+                    )
+                    summaries = spending_module.monthly_summaries(
+                        state.transactions
+                    )
                     return self._html(
                         templates.render_trends(
-                            state, trends, months, projected, flash=flash,
+                            state, trends, months, projected,
+                            income_by_month=income_map,
+                            summaries=summaries,
+                            flash=flash,
+                        )
+                    )
+                if path == "/transactions":
+                    state = self._state()
+                    active_month = (query.get("month", [""])[0] or "").strip()
+                    active_category = (
+                        query.get("category", [""])[0] or ""
+                    ).strip()
+                    active_account = (
+                        query.get("account", [""])[0] or ""
+                    ).strip()
+                    months = spending_module.months_of(state.transactions)
+                    filtered = []
+                    for i, tx in enumerate(state.transactions):
+                        if active_month and tx.month != active_month:
+                            continue
+                        if active_category and tx.category != active_category:
+                            continue
+                        if active_account and tx.account != active_account:
+                            continue
+                        filtered.append((i, tx))
+                    # Most-recent first is easier to scan on a phone.
+                    filtered.sort(key=lambda p: p[1].date, reverse=True)
+                    return self._html(
+                        templates.render_transactions_page(
+                            state, filtered, months,
+                            active_month, active_category, active_account,
+                            flash=flash,
                         )
                     )
                 if path == "/import":
@@ -404,6 +446,8 @@ def make_handler(store_path: Path):
                     return self._post_pdf_save(form)
                 if path == "/import/pdf/transactions/save":
                     return self._post_transactions_save(form)
+                if path == "/transactions/save":
+                    return self._post_transaction_categories(form)
                 self._html(
                     templates.render_page(
                         "", "Not found", "<h2>404</h2>"
@@ -762,6 +806,57 @@ def make_handler(store_path: Path):
                 transactions, source_name="pasted",
             )
             return self._html(html)
+
+        def _post_transaction_categories(
+            self, form: dict[str, list[str]]
+        ) -> None:
+            """Accept category overrides from the /transactions page.
+
+            Each row the template rendered posts back `category_<idx>`
+            for its state-position index. We update only rows where
+            the category actually changed, so spurious resubmits don't
+            churn the JSON store.
+            """
+            state = self._state()
+            changed = 0
+            for key, values in form.items():
+                if not key.startswith("category_"):
+                    continue
+                try:
+                    idx = int(key.split("_", 1)[1])
+                except ValueError:
+                    continue
+                if not (0 <= idx < len(state.transactions)):
+                    continue
+                new_cat = (values[0] if values else "").strip()
+                if not new_cat:
+                    continue
+                try:
+                    tx = state.transactions[idx]
+                    if tx.category == new_cat:
+                        continue
+                    # Use replace-style mutation since Transaction is a
+                    # frozen-ish dataclass validated in __post_init__.
+                    from dataclasses import replace as _replace
+                    state.transactions[idx] = _replace(tx, category=new_cat)
+                    changed += 1
+                except ValueError:
+                    continue  # unknown category slipped through
+            if changed:
+                self._save(state)
+                _set_flash(
+                    "success", f"Updated {changed} transaction categor(y/ies).",
+                )
+            else:
+                _set_flash("error", "No category changes to save.")
+            # Preserve filters if any came in via form → redirect target.
+            params = []
+            for key in ("month", "category", "account"):
+                val = (form.get(key, [""])[0] or "").strip()
+                if val:
+                    params.append(f"{key}={val}")
+            suffix = ("?" + "&".join(params)) if params else ""
+            self._redirect("/transactions" + suffix)
 
         def _post_pdf_save(self, form: dict[str, list[str]]) -> None:
             state = self._state()

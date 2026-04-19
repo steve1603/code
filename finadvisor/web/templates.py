@@ -114,6 +114,7 @@ def _nav(active: str) -> str:
         ("budget", "/budget", "Budget"),
         ("spending", "/spending", "Spending"),
         ("trends", "/trends", "Trends"),
+        ("transactions", "/transactions", "Transactions"),
         ("analysis", "/analysis", "Analysis"),
         ("import", "/import", "Import"),
     ]
@@ -817,6 +818,7 @@ def render_spending(
     summaries,
     insights,
     per_account,
+    breakdown=None,
     flash: str = "",
 ) -> str:
     """Monthly cashflow view: headline cards + insight list + the most
@@ -905,6 +907,47 @@ def render_spending(
            else '<p class="muted">No expense rows this month.</p>')
     )
 
+    # Per-account-per-category breakdown: for each account, render a
+    # small bars section showing where that account's money went this
+    # month. Only shown when multiple accounts exist.
+    breakdown_html = ""
+    if breakdown and len(breakdown) >= 2:
+        sections = []
+        for acct in sorted(breakdown.keys()):
+            cats = sorted(
+                ((c, v) for c, v in breakdown[acct].items() if v > 0),
+                key=lambda x: x[1], reverse=True,
+            )
+            if not cats:
+                continue
+            acct_total = sum(v for _, v in cats)
+            acct_max = cats[0][1] if cats else 1.0
+            bars = []
+            for cat, v in cats:
+                pct = min(100.0, v / acct_max * 100)
+                bars.append(
+                    f'<div style="margin-bottom:6px">'
+                    f'<div style="display:flex;justify-content:space-between;'
+                    f'font-size:12px;margin-bottom:2px">'
+                    f'<span>{_esc(cat.replace("_", " ").title())}</span>'
+                    f'<span class="muted">{_money(v)}</span></div>'
+                    f'<div class="bar bar-info"><span '
+                    f'style="width:{pct:.1f}%"></span></div></div>'
+                )
+            sections.append(
+                '<section style="margin-bottom:18px">'
+                f'<div style="display:flex;justify-content:space-between;'
+                f'align-items:baseline"><strong>{_esc(acct)}</strong>'
+                f'<span class="muted">{_money(acct_total)}</span></div>'
+                + "".join(bars)
+                + '</section>'
+            )
+        if sections:
+            breakdown_html = (
+                '<h3 style="margin-top:24px">By account — '
+                f'{_esc(latest.month)}</h3>' + "".join(sections)
+            )
+
     # Per-account summary for the current month (if there's more than one
     # account, it's useful to see where the money's flowing).
     acct_html = ""
@@ -950,8 +993,13 @@ def render_spending(
 <div class="cards">{cards_html}</div>
 {insights_html}
 {cat_html}
+{breakdown_html}
 {acct_html}
 {history_html}
+<p class="muted" style="margin-top:16px">
+  Something miscategorized? Fix it on the
+  <a href="/transactions">Transactions</a> page.
+</p>
 """
     return render_page("spending", "Spending", content, flash=flash)
 
@@ -961,6 +1009,8 @@ def render_trends(
     trends,
     months,
     projected: float,
+    income_by_month=None,
+    summaries=None,
     flash: str = "",
 ) -> str:
     """Category-by-category movement across every month on file."""
@@ -976,7 +1026,62 @@ def render_trends(
 
     shown_months = months[-6:]
     header_cells = "".join(f"<th>{_esc(m)}</th>" for m in shown_months)
-    rows = []
+
+    # Top rows: income and net cashflow, so the reader sees the
+    # earning side of the ledger before diving into categories.
+    income_by_month = income_by_month or {}
+    summaries_map = {s.month: s for s in (summaries or [])}
+    summary_rows = []
+    if income_by_month:
+        incomes = [income_by_month.get(m, 0.0) for m in shown_months]
+        avg_income = (sum(incomes) / len(incomes)) if incomes else 0.0
+        prev_income = incomes[-2] if len(incomes) >= 2 else 0.0
+        income_delta = incomes[-1] - prev_income if incomes else 0.0
+        arrow = "▲" if income_delta > 0 else ("▼" if income_delta < 0 else "•")
+        delta_sev = (
+            "good" if income_delta > 0 else
+            "warn" if income_delta < 0 else "info"
+        )
+        income_cells = "".join(
+            f"<td>{_money(v)}</td>" for v in incomes
+        )
+        summary_rows.append(
+            f'<tr style="background:#ecfdf5">'
+            f'<td><strong>Income</strong></td>'
+            f"{income_cells}"
+            f"<td>{_money(avg_income)}</td>"
+            f'<td><span class="banner severity-{delta_sev}" '
+            f'style="display:inline-block;margin:0;padding:2px 8px;'
+            f'font-size:12px;border-radius:999px">'
+            f'{arrow} {_fmt_delta(income_delta)}</span></td>'
+            f'</tr>'
+        )
+    if summaries:
+        net_values = [
+            (summaries_map[m].net if m in summaries_map else 0.0)
+            for m in shown_months
+        ]
+        avg_net = sum(net_values) / len(net_values) if net_values else 0.0
+        prev_net = net_values[-2] if len(net_values) >= 2 else 0.0
+        net_delta = net_values[-1] - prev_net if net_values else 0.0
+        arrow = "▲" if net_delta > 0 else ("▼" if net_delta < 0 else "•")
+        net_sev = (
+            "good" if net_delta > 0 else
+            "warn" if net_delta < 0 else "info"
+        )
+        net_cells = "".join(f"<td>{_money(v)}</td>" for v in net_values)
+        summary_rows.append(
+            f'<tr style="background:#eff6ff">'
+            f'<td><strong>Net cashflow</strong></td>'
+            f"{net_cells}"
+            f"<td>{_money(avg_net)}</td>"
+            f'<td><span class="banner severity-{net_sev}" '
+            f'style="display:inline-block;margin:0;padding:2px 8px;'
+            f'font-size:12px;border-radius:999px">'
+            f'{arrow} {_fmt_delta(net_delta)}</span></td>'
+            f'</tr>'
+        )
+    rows = list(summary_rows)
     for t in trends:
         if t.latest == 0 and t.rolling_3mo == 0 and t.previous == 0:
             continue
@@ -1031,6 +1136,132 @@ more. The 3-month average smooths out one-off bills.
 </p>
 """
     return render_page("trends", "Trends", content, flash=flash)
+
+
+def _category_select(name: str, selected: str) -> str:
+    from finadvisor.models import SPENDING_CATEGORIES
+    opts = "".join(
+        f'<option value="{v}"{" selected" if v == selected else ""}>'
+        f"{_esc(v.replace('_', ' ').title())}</option>"
+        for v in SPENDING_CATEGORIES
+    )
+    return f'<select name="{name}" style="min-width:140px">{opts}</select>'
+
+
+def render_transactions_page(
+    state: FinanceState,
+    indices_and_tx,  # list[tuple[int, Transaction]] — preserves state indices
+    months: list[str],
+    active_month: str,
+    active_category: str,
+    active_account: str,
+    flash: str = "",
+) -> str:
+    """All-transactions ledger with per-row category override.
+
+    The caller pre-filters the rows by (month, category, account) and
+    passes in (state_index, Transaction) pairs so the form can post
+    back the original transaction positions.
+    """
+    from finadvisor.models import SPENDING_CATEGORIES
+
+    # Filter controls.
+    month_opts = (
+        '<option value="">All months</option>'
+        + "".join(
+            f'<option value="{_esc(m)}"'
+            f'{" selected" if m == active_month else ""}>{_esc(m)}</option>'
+            for m in months
+        )
+    )
+    cat_opts = (
+        '<option value="">All categories</option>'
+        + "".join(
+            f'<option value="{v}"'
+            f'{" selected" if v == active_category else ""}>'
+            f"{_esc(v.replace('_', ' ').title())}</option>"
+            for v in SPENDING_CATEGORIES
+        )
+    )
+    account_names = sorted({a.name for a in state.accounts})
+    acct_opts = (
+        '<option value="">All accounts</option>'
+        + "".join(
+            f'<option value="{_esc(n)}"'
+            f'{" selected" if n == active_account else ""}>{_esc(n)}</option>'
+            for n in account_names
+        )
+    )
+
+    filters = f"""
+<form method="get" action="/transactions"
+      style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+  <div style="flex:1 1 140px"><label>Month</label>
+    <select name="month">{month_opts}</select></div>
+  <div style="flex:1 1 140px"><label>Category</label>
+    <select name="category">{cat_opts}</select></div>
+  <div style="flex:1 1 140px"><label>Account</label>
+    <select name="account">{acct_opts}</select></div>
+  <div><button type="submit">Filter</button></div>
+</form>
+"""
+
+    if not indices_and_tx:
+        return render_page(
+            "transactions", "Transactions",
+            f"<h2>Transactions</h2>{filters}"
+            '<p class="muted" style="margin-top:16px">No transactions '
+            "match these filters. Import a bank statement on the "
+            '<a href="/import">Import</a> page, or widen the filter '
+            "above.</p>",
+            flash=flash,
+        )
+
+    rows = []
+    for idx, tx in indices_and_tx:
+        amount_cls = "color:#059669" if tx.amount > 0 else "color:#1f2937"
+        rows.append(
+            "<tr>"
+            f"<td>{_esc(tx.date)}</td>"
+            f'<td class="muted" style="font-size:12px">{_esc(tx.account)}</td>'
+            f"<td>{_esc(tx.description[:80])}</td>"
+            f'<td style="text-align:right;{amount_cls}">'
+            f"{_money(tx.amount)}</td>"
+            f"<td>{_category_select(f'category_{idx}', tx.category)}</td>"
+            f'<input type="hidden" name="row_{idx}" value="1">'
+            "</tr>"
+        )
+
+    total_spend = sum(-t.amount for _, t in indices_and_tx if t.amount < 0)
+    total_income = sum(t.amount for _, t in indices_and_tx if t.amount > 0)
+    content = f"""
+<h2>Transactions</h2>
+{filters}
+<div class="banner severity-info" style="margin-top:12px">
+  <strong>{len(indices_and_tx)} row(s)</strong>
+  Income {_money(total_income)} · Spending {_money(total_spend)}.
+  Change a category in the dropdown and click Save to re-label
+  transactions the auto-classifier got wrong.
+</div>
+<form method="post" action="/transactions/save">
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr>
+      <th>Date</th><th>Account</th><th>Description</th>
+      <th style="text-align:right">Amount</th><th>Category</th>
+    </tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+  </div>
+  <p style="margin-top:12px">
+    <button type="submit">Save category changes</button>
+    <a class="btn secondary" href="/spending">Back to spending</a>
+  </p>
+</form>
+"""
+    return render_page(
+        "transactions", "Transactions", content, flash=flash,
+    )
 
 
 def flash_success(msg: str) -> str:

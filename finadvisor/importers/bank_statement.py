@@ -441,10 +441,34 @@ _CATEGORY_RULES: list[tuple[str, re.Pattern]] = [
         r"\b(payroll|direct\s+dep(?:osit)?|salary|ACH\s+CREDIT|"
         r"interest\s+paid|refund|reimbursement|tax\s+refund|"
         r"(?:dep|deposit)\s+from)\b", re.IGNORECASE)),
+    # Utilities fires before debt_payment so specific recurring
+    # household bills (MUD, OPPD, Freedom Mortgage) don't fall through
+    # into the generic *-autopay debt rules below.
+    ("utilities", re.compile(
+        r"\b(electric|power\s*co|power\s*company|utility|utilities|"
+        r"water\s*dept|water\s*bill|gas\s*bill|waste\s*mgmt|"
+        r"sewer|trash|disposal|mud\b|m\.?u\.?d\.?|oppd\b|"
+        r"metropolitan\s*utilities|omaha\s*public\s*power|"
+        r"freedom\s*mortgage|mortgage\s*co)\b", re.IGNORECASE)),
+    # Subscriptions ditto — Experian / Course Hero / Netflix are
+    # specific recurring services; put them before debt-payment rules
+    # so they beat the generic "autopay" matcher.
+    ("subscriptions", re.compile(
+        r"\b(netflix|spotify|hulu|disney\s*plus|disney\+|apple\.com/bill|"
+        r"prime\s*video|amazon\s*prime|youtube\s*(?:tv|premium)|"
+        r"hbo|paramount|peacock|audible|patreon|substack|"
+        r"icloud|onedrive|dropbox|github|adobe|microsoft\s*365|"
+        r"office\s*365|experian|equifax|transunion|credit\s*karma|"
+        r"coursehero|course\s*hero|chegg|duolingo|linkedin\s*premium|"
+        r"nytimes|wsj\s*subscription|new\s*york\s*times)\b",
+        re.IGNORECASE)),
     ("debt_payment", re.compile(
         r"\b(credit\s*card\s*payment|loan\s*payment|mortgage\s*payment|"
-        r"auto\s*loan|student\s*loan|autopay|card\s*payment|"
-        r"citi\s*autopay|chase\s*card|amex\s*payment)\b", re.IGNORECASE)),
+        r"auto\s*loan|student\s*loan|card\s*payment|card\s*autopay|"
+        r"loan\s*autopay|citi\s*autopay|"
+        r"chase\s*card|chase\s*autopay|amex\s*payment|amex\s*autopay|"
+        r"discover\s*card\s*pymt|capital\s*one\s*card)\b",
+        re.IGNORECASE)),
     ("transfer", re.compile(
         r"\b(funds\s*transfer|transfer\s*(?:to|from)|zelle|venmo|cashapp|"
         r"cash\s*app|paypal|wire\s*transfer|ATM\s*transfer|"
@@ -473,10 +497,6 @@ _CATEGORY_RULES: list[tuple[str, re.Pattern]] = [
         r"\b(home\s*depot|lowe'?s|menards|ikea|ace\s*hardware|"
         r"harbor\s*freight|wayfair|at\s*home|best\s*buy)\b",
         re.IGNORECASE)),
-    ("utilities", re.compile(
-        r"\b(electric|power\s*co|power\s*company|utility|utilities|"
-        r"water\s*dept|water\s*bill|gas\s*bill|waste\s*mgmt|"
-        r"sewer|trash|disposal)\b", re.IGNORECASE)),
     ("phone_internet", re.compile(
         r"\b(at\s*&\s*t|verizon|t[- ]?mobile|sprint|comcast|xfinity|"
         r"spectrum|cox\s*comm|centurylink|google\s*fi|"
@@ -489,12 +509,6 @@ _CATEGORY_RULES: list[tuple[str, re.Pattern]] = [
         r"\b(pharmacy|cvs\s*pharmacy|walgreens|rite\s*aid|medical|"
         r"dental|doctor|clinic|hospital|urgent\s*care|"
         r"lab\s*corp|quest\s*diag)\b", re.IGNORECASE)),
-    ("subscriptions", re.compile(
-        r"\b(netflix|spotify|hulu|disney\s*plus|disney\+|apple\.com/bill|"
-        r"prime\s*video|amazon\s*prime|youtube\s*(?:tv|premium)|"
-        r"hbo|paramount|peacock|audible|patreon|substack|"
-        r"icloud|onedrive|dropbox|github|adobe|microsoft\s*365|"
-        r"office\s*365)\b", re.IGNORECASE)),
     ("entertainment", re.compile(
         r"\b(cinema|movie|theater|theatre|ticketmaster|stubhub|"
         r"steam\s*games|playstation|xbox|nintendo|arcade|bowling|"

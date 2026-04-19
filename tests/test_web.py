@@ -302,6 +302,51 @@ class SpendingRoutesTests(WebTestBase):
         self.assertEqual(code, 200)
         self.assertIn("Trends", body)
         self.assertIn("3-month projection", body)
+        # Income row should render once we've imported data.
+        self.assertIn("Income", body)
+
+    def test_transactions_page_lists_rows(self):
+        self.post("/import/statement", {"statement": self.SAMPLE})
+        code, body = self.get("/transactions")
+        self.assertEqual(code, 200)
+        self.assertIn("Transactions", body)
+        # Each row renders a category <select> with the current value.
+        self.assertIn('name="category_0"', body)
+
+    def test_transaction_category_override_persists(self):
+        self.post("/import/statement", {"statement": self.SAMPLE})
+        # Find the index of the Netflix row (subscriptions by default).
+        s = self.state()
+        netflix_idx = next(
+            i for i, t in enumerate(s.transactions)
+            if "NETFLIX" in t.description.upper()
+        )
+        code, _ = self.post(
+            "/transactions/save",
+            {f"category_{netflix_idx}": "entertainment"},
+        )
+        self.assertEqual(code, 200)
+        s2 = self.state()
+        self.assertEqual(
+            s2.transactions[netflix_idx].category, "entertainment",
+        )
+
+    def test_spending_shows_account_breakdown_section(self):
+        # Two different statements → two accounts → breakdown renders.
+        self.post("/import/statement", {"statement": self.SAMPLE})
+        second = (
+            "Statement Period 02/01/2026 to 02/28/2026\n"
+            "Chase Bank\n"
+            "CHASE TOTAL CHECKING\n"
+            "Account Number: 987654321\n"
+            "Date Description Debits Credits Balance\n"
+            "02/10 KROGER GROCERIES $75.50 $500.00\n"
+            "02/14 OPPD AUTOPAY $185.00 $315.00\n"
+        )
+        self.post("/import/statement", {"statement": second})
+        code, body = self.get("/spending")
+        self.assertEqual(code, 200)
+        self.assertIn("By account", body)
 
 
 class StatementPasteTests(WebTestBase):

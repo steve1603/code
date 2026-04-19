@@ -171,6 +171,40 @@ def totals_by_account(
     return buckets
 
 
+def income_by_month(
+    transactions: Iterable[Transaction],
+) -> dict[str, float]:
+    """Month → total income (across every account). Transfer rows are
+    excluded so self-transfers between a user's own accounts don't
+    double-count. Feeds the month-over-month income row on /trends."""
+    out: dict[str, float] = {}
+    for tx in transactions:
+        if tx.amount <= 0 or tx.category == "transfer":
+            continue
+        out[tx.month] = out.get(tx.month, 0.0) + tx.amount
+    return out
+
+
+def account_category_breakdown(
+    transactions: Iterable[Transaction], month: str,
+) -> dict[str, dict[str, float]]:
+    """{account: {category: magnitude}} for a single month's spending.
+
+    Income/transfer categories are excluded so the matrix reflects
+    real outflows — which is what /spending needs to show where money
+    went per account."""
+    out: dict[str, dict[str, float]] = {}
+    for tx in transactions:
+        if tx.month != month or tx.amount >= 0:
+            continue
+        if tx.category in NON_SPENDING_CATEGORIES:
+            continue
+        acct = tx.account or "(unassigned)"
+        bucket = out.setdefault(acct, {})
+        bucket[tx.category] = bucket.get(tx.category, 0.0) + (-tx.amount)
+    return out
+
+
 def _pct_change(a: float, b: float) -> float | None:
     """(a - b) / b, handling the b=0 case gracefully."""
     if b == 0:

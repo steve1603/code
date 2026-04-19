@@ -200,6 +200,15 @@ class CategorizeTests(unittest.TestCase):
         ("OVERDRAFT FEE", "fees"),
         ("ATM WITHDRAWAL 400.00", "cash"),
         ("Random mystery merchant", "other"),
+        # User-reported merchants (USAA statement walkthrough):
+        ("RECURRING DEB CARD PURCH Experian* Credit Report",
+         "subscriptions"),
+        ("RECURRING DEB CARD PURCH WWW.COURSEHERO.COM",
+         "subscriptions"),
+        ("MUD AUTOPAY 402", "utilities"),
+        ("OPPD AUTOPAY", "utilities"),
+        ("METROPOLITAN UTILITIES DISTRICT", "utilities"),
+        ("FREEDOM MORTGAGE AUTOPAY", "utilities"),
     ]
 
     def test_each_case(self):
@@ -340,6 +349,40 @@ class TotalsByAccountTests(unittest.TestCase):
         self.assertAlmostEqual(per["Checking"].spending, 300)
         self.assertAlmostEqual(per["Checking"].income, 2000)
         self.assertAlmostEqual(per["Savings"].spending, 50)
+
+
+class IncomeByMonthTests(unittest.TestCase):
+    def test_sums_positive_non_transfer_amounts(self):
+        txs = [
+            _tx("2026-01-05", 2500, "income"),
+            _tx("2026-01-12", 400, "other"),  # positive non-transfer
+            _tx("2026-01-20", -100, "dining"),
+            _tx("2026-02-01", 2500, "income"),
+            _tx("2026-02-10", 300, "transfer"),  # excluded: self-move
+        ]
+        by_month = spending.income_by_month(txs)
+        self.assertAlmostEqual(by_month["2026-01"], 2900)
+        self.assertAlmostEqual(by_month["2026-02"], 2500)
+
+
+class AccountCategoryBreakdownTests(unittest.TestCase):
+    def test_only_spending_shows_up(self):
+        txs = [
+            _tx("2026-03-05", -120, "dining", account="Checking"),
+            _tx("2026-03-08", -250, "groceries", account="Checking"),
+            _tx("2026-03-12", -50, "gas", account="Savings"),
+            _tx("2026-03-15", 2000, "income", account="Checking"),
+            _tx("2026-03-18", -100, "transfer", account="Checking"),
+        ]
+        breakdown = spending.account_category_breakdown(txs, "2026-03")
+        self.assertIn("Checking", breakdown)
+        self.assertIn("Savings", breakdown)
+        self.assertAlmostEqual(breakdown["Checking"]["dining"], 120)
+        self.assertAlmostEqual(breakdown["Checking"]["groceries"], 250)
+        self.assertAlmostEqual(breakdown["Savings"]["gas"], 50)
+        # income/transfer categories excluded
+        self.assertNotIn("income", breakdown["Checking"])
+        self.assertNotIn("transfer", breakdown["Checking"])
 
 
 class ProjectionTests(unittest.TestCase):
