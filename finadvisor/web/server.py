@@ -602,7 +602,10 @@ def make_handler(store_path: Path):
             self._save(state)
             parts = []
             if added:
-                parts.append(f"imported {added} debt(s)")
+                parts.append(
+                    f"imported {added} debt(s) — edit each to set "
+                    f"balance and APR"
+                )
             if skipped:
                 parts.append(f"{skipped} skipped (name already exists)")
             if unselected_sum > 0:

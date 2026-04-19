@@ -260,9 +260,21 @@ def _edit_row(d: Debt) -> str:
 
 def _display_row(d: Debt) -> str:
     edit_url = f"/debts?edit={_esc(d.name)}"
+    # Flag debts that were created from a bank-statement import where
+    # only the monthly payment is known — balance and APR still need
+    # filling in for the analysis to be meaningful.
+    incomplete = d.balance == 0 or d.apr == 0
+    name_cell = _esc(d.name)
+    if incomplete:
+        name_cell += (
+            ' <span title="Balance or APR is zero — open to complete."'
+            ' style="background:#fef3c7;color:#92400e;border-radius:4px;'
+            'padding:1px 6px;font-size:11px;font-weight:700;'
+            'margin-left:6px">needs info</span>'
+        )
     return (
         "<tr>"
-        f"<td>{_esc(d.name)}</td>"
+        f"<td>{name_cell}</td>"
         f"<td>{_esc(d.kind)}</td>"
         f"<td>{_money(d.balance)}</td>"
         f"<td>{d.apr * 100:.2f}%</td>"
