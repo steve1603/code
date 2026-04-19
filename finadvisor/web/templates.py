@@ -361,7 +361,7 @@ is left over after expenses and minimum debt payments.</p>
   <p style="margin-top:12px"><button type="submit">Save</button></p>
 </form>
 """
-    return render_page("budget", "Budget", content)
+    return render_page("budget", "Budget", content, flash=flash)
 
 
 def _strip_md(text: str) -> str:
@@ -492,8 +492,8 @@ def render_import(preview: str = "", flash: str = "") -> str:
 balance, APR, minimum payment, and credit limit (best effort). You'll
 get a confirmation screen to correct anything before saving.</p>
 <form method="post" action="/import/pdf" enctype="multipart/form-data">
-  <label>PDF file</label>
-  <input type="file" name="pdf" accept="application/pdf,.pdf" required>
+  <label>PDF files (you can select several at once)</label>
+  <input type="file" name="pdf" accept="application/pdf,.pdf" multiple required>
   <p style="margin-top:12px"><button type="submit">Upload &amp; parse</button></p>
 </form>
 
@@ -512,7 +512,11 @@ Auto Loan,auto,12000,0.045,300,"></textarea>
     return render_page("import", "Import", content, flash=flash)
 
 
-def render_transactions_confirm(transactions, source_name: str = "") -> str:
+def render_transactions_confirm(
+    transactions,
+    source_name: str = "",
+    errors: list[str] | None = None,
+) -> str:
     """Checklist of bank-statement transactions to import as debts.
 
     Each row has a checkbox, an editable name + kind dropdown, and a
@@ -520,6 +524,9 @@ def render_transactions_confirm(transactions, source_name: str = "") -> str:
     payments) are pre-selected; all others default to unchecked so the
     user isn't surprised by dozens of Taco Bell charges on the Debts
     page.
+
+    If multiple files were uploaded, a Source column is added so the
+    user can tell which statement each row came from.
     """
     from finadvisor.importers.bank_statement import (
         suggest_debt_name, looks_like_debt_payment,
@@ -529,6 +536,8 @@ def render_transactions_confirm(transactions, source_name: str = "") -> str:
     total_debit = sum(t.debit or 0 for t in debits)
     credits = [t for t in transactions if t.credit is not None]
     total_credit = sum(t.credit or 0 for t in credits)
+    sources = {getattr(t, "source", "") for t in debits}
+    show_source = len(sources) > 1
 
     if not debits:
         return render_page(
@@ -543,10 +552,16 @@ def render_transactions_confirm(transactions, source_name: str = "") -> str:
         preselect = "checked" if looks_like_debt_payment(tx) else ""
         name = suggest_debt_name(tx)
         kind_select = _kind_select(f"kind_{i}", tx.kind_guess)
+        source_cell = (
+            f'<td class="muted" style="font-size:12px">'
+            f'{_esc(getattr(tx, "source", ""))}</td>'
+            if show_source else ""
+        )
         rows.append(
             "<tr>"
             f'<td><input type="checkbox" name="select_{i}" {preselect}></td>'
             f"<td>{_esc(tx.date)}</td>"
+            f"{source_cell}"
             f'<td><input name="name_{i}" value="{_esc(name)}"></td>'
             f"<td>{kind_select}</td>"
             f"<td style=\"text-align:right\">{_money(tx.debit or 0)}</td>"
@@ -554,6 +569,8 @@ def render_transactions_confirm(transactions, source_name: str = "") -> str:
             f'<input type="hidden" name="amount_{i}" value="{tx.debit or 0}">'
             "</tr>"
         )
+
+    source_header = "<th>Source</th>" if show_source else ""
 
     credits_note = ""
     if credits:
@@ -563,8 +580,19 @@ def render_transactions_confirm(transactions, source_name: str = "") -> str:
             "detected and are not shown (deposits aren't debts).</p>"
         )
 
+    errors_note = ""
+    if errors:
+        items = "".join(f"<li>{_esc(e)}</li>" for e in errors)
+        errors_note = (
+            f'<div class="banner severity-warn">'
+            f"<strong>Some files couldn't be parsed</strong>"
+            f"<ul>{items}</ul></div>"
+        )
+
+    expense_total_hint = _money(total_debit)
     content = f"""
 <h2>Confirm transactions</h2>
+{errors_note}
 <div class="banner severity-info">
   <strong>Found {len(debits)} debit transactions</strong>
   totaling {_money(total_debit)} in {_esc(source_name or "this statement")}.
@@ -586,11 +614,25 @@ def render_transactions_confirm(transactions, source_name: str = "") -> str:
   <div style="overflow-x:auto">
   <table>
     <thead><tr>
-      <th></th><th>Date</th><th>Debt name</th><th>Kind</th>
+      <th></th><th>Date</th>{source_header}<th>Debt name</th><th>Kind</th>
       <th style="text-align:right">Amount</th><th>From description</th>
     </tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
+  </div>
+  <div style="background:white;border:1px solid #e5e7eb;border-radius:10px;
+       padding:12px 16px;margin-top:12px">
+    <label style="font-weight:600">
+      <input type="checkbox" name="add_unselected_to_expenses" value="1"
+             style="width:auto;margin-right:8px">
+      Also add the <em>unselected</em> debits to monthly expenses
+    </label>
+    <p class="muted" style="margin:6px 0 0">
+      Total debits on this page: {expense_total_hint}. Whatever you
+      leave unchecked above will be summed and added to your Budget's
+      monthly expenses — useful for capturing groceries, gas, and
+      other spending that isn't a tracked debt.
+    </p>
   </div>
   <p class="muted" style="margin-top:8px">
     Each imported transaction becomes a Debt with

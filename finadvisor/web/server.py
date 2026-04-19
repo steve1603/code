@@ -449,75 +449,123 @@ def make_handler(store_path: Path):
             except Exception as e:
                 _set_flash("error", f"Could not parse upload: {e}")
                 return self._redirect("/import")
-            uploads = files.get("pdf") or []
-            if not uploads or not uploads[0][0]:
+            uploads = [
+                (name, payload) for name, payload in (files.get("pdf") or [])
+                if name and payload
+            ]
+            if not uploads:
                 _set_flash("error", "No PDF file selected.")
                 return self._redirect("/import")
-            filename, payload = uploads[0]
-            if not payload:
-                _set_flash("error", "Uploaded PDF was empty.")
-                return self._redirect("/import")
-            # pypdf reads from a path, so write to a temp file.
-            with tempfile.NamedTemporaryFile(
-                suffix=".pdf", delete=False
-            ) as tmp:
-                tmp.write(payload)
-                tmp_path = Path(tmp.name)
-            try:
-                extraction = pdf_importer.parse(tmp_path)
-            except pdf_importer.PDFImportError as e:
-                _set_flash("error", str(e))
-                return self._redirect("/import")
-            finally:
-                try:
-                    tmp_path.unlink()
-                except OSError:
-                    pass
-            # Override the filename-derived suggested name with the actual
-            # uploaded filename (the temp name would otherwise leak through).
-            stem = Path(filename).stem.replace("_", " ").replace("-", " ").strip()
-            if stem:
-                extraction.suggested_name = stem
-            # If the PDF looks like a bank statement (many dated debit
-            # lines) offer the user the transaction-picker flow instead
-            # of the single-debt confirm dialog.
-            if bank_statement.is_bank_statement(extraction.raw_text):
-                transactions = bank_statement.parse_transactions(
-                    extraction.raw_text
+
+            # Parse each PDF, keeping track of which file each
+            # transaction came from so the user can tell them apart.
+            all_transactions: list = []
+            single_extractions: list = []
+            errors: list[str] = []
+            for filename, payload in uploads:
+                stem = (
+                    Path(filename).stem.replace("_", " ")
+                    .replace("-", " ").strip()
+                    or "statement"
                 )
-                if transactions:
-                    return self._html(
-                        templates.render_transactions_confirm(
-                            transactions, source_name=stem or "statement",
-                        )
+                with tempfile.NamedTemporaryFile(
+                    suffix=".pdf", delete=False
+                ) as tmp:
+                    tmp.write(payload)
+                    tmp_path = Path(tmp.name)
+                try:
+                    extraction = pdf_importer.parse(tmp_path)
+                except pdf_importer.PDFImportError as e:
+                    errors.append(f"{filename}: {e}")
+                    continue
+                finally:
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                extraction.suggested_name = stem
+                if bank_statement.is_bank_statement(extraction.raw_text):
+                    for tx in bank_statement.parse_transactions(
+                        extraction.raw_text
+                    ):
+                        # Attach source so the confirm page can show it.
+                        tx.source = stem  # type: ignore[attr-defined]
+                        all_transactions.append(tx)
+                else:
+                    single_extractions.append(extraction)
+
+            if errors and not all_transactions and not single_extractions:
+                _set_flash("error", " / ".join(errors))
+                return self._redirect("/import")
+
+            if all_transactions:
+                # Prefix any errors as a note at the top of the page.
+                source_summary = (
+                    "multiple statements" if len(uploads) > 1
+                    else (
+                        single_extractions[0].suggested_name
+                        if single_extractions
+                        else all_transactions[0].source
                     )
+                )
+                return self._html(
+                    templates.render_transactions_confirm(
+                        all_transactions,
+                        source_name=source_summary,
+                        errors=errors,
+                    )
+                )
+
+            # No bank statements — fall back to single-debt confirm for
+            # the first extraction. (Multi-file single-debt imports
+            # would need a confirm queue; not implemented.)
+            if len(single_extractions) > 1:
+                _set_flash(
+                    "error",
+                    f"Uploaded {len(single_extractions)} non-statement PDFs; "
+                    "only the first will be shown. Upload them one at a "
+                    "time to confirm each.",
+                )
             return self._html(
-                templates.render_pdf_confirm(extraction)
+                templates.render_pdf_confirm(single_extractions[0])
             )
 
         def _post_transactions_save(self, form: dict[str, list[str]]) -> None:
-            # Find every selected row: checkbox name is `select_<index>`.
-            selected_indices = [
+            # All hidden amount_<i> fields are always submitted, so we
+            # can tell both which rows were selected AND which were
+            # explicitly left unselected.
+            all_indices = sorted({
+                int(k.split("_", 1)[1])
+                for k in form.keys()
+                if k.startswith("amount_") and k.split("_", 1)[1].isdigit()
+            })
+            selected_indices = sorted({
                 int(k.split("_", 1)[1])
                 for k in form.keys()
                 if k.startswith("select_") and k.split("_", 1)[1].isdigit()
-            ]
-            if not selected_indices:
-                _set_flash("error", "No transactions selected.")
+            })
+            selected_set = set(selected_indices)
+            add_unselected = bool(form.get("add_unselected_to_expenses"))
+
+            if not selected_indices and not add_unselected:
+                _set_flash(
+                    "error",
+                    "No transactions selected and the 'add unselected to "
+                    "expenses' box is unchecked — nothing to do.",
+                )
                 return self._redirect("/import")
+
             state = self._state()
             existing_names = {d.name for d in state.debts}
             added = skipped = 0
             errors: list[str] = []
-            for i in sorted(selected_indices):
+            for i in selected_indices:
                 name = _str(form, f"name_{i}")
                 kind = _str(form, f"kind_{i}", "other")
                 try:
                     amount = _float(form, f"amount_{i}")
                 except ValueError:
                     amount = 0.0
-                # Dedupe by name: if the user already has that debt,
-                # skip rather than clobber.
                 if name in existing_names:
                     skipped += 1
                     continue
@@ -533,14 +581,39 @@ def make_handler(store_path: Path):
                     added += 1
                 except ValueError as e:
                     errors.append(f"{name}: {e}")
+
+            unselected_sum = 0.0
+            if add_unselected:
+                for i in all_indices:
+                    if i in selected_set:
+                        continue
+                    try:
+                        unselected_sum += _float(form, f"amount_{i}")
+                    except ValueError:
+                        pass
+                if unselected_sum > 0:
+                    state.budget = Budget(
+                        monthly_income=state.budget.monthly_income,
+                        monthly_expenses=(
+                            state.budget.monthly_expenses + unselected_sum
+                        ),
+                    )
+
             self._save(state)
-            msg = f"Imported {added} transactions as debts"
+            parts = []
+            if added:
+                parts.append(f"imported {added} debt(s)")
             if skipped:
-                msg += f" ({skipped} skipped — name already exists)"
+                parts.append(f"{skipped} skipped (name already exists)")
+            if unselected_sum > 0:
+                parts.append(
+                    f"added ${unselected_sum:,.2f} to monthly expenses"
+                )
             if errors:
-                msg += f". Errors: {'; '.join(errors[:3])}"
+                parts.append(f"errors: {'; '.join(errors[:3])}")
+            msg = "Statement import: " + ", ".join(parts) + "."
             _set_flash(
-                "error" if errors and added == 0 else "success", msg + "."
+                "error" if errors and added == 0 else "success", msg,
             )
             self._redirect("/debts")
 
@@ -572,6 +645,21 @@ def make_handler(store_path: Path):
     return Handler
 
 
+def build_server(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    store_path: Path | str = storage.DEFAULT_STORE,
+) -> ThreadingHTTPServer:
+    """Construct the HTTP server without starting the request loop.
+
+    Kept separate from serve() so unit tests can bind to an ephemeral
+    port (port=0), drive it from a background thread, and shut it down
+    cleanly.
+    """
+    handler = make_handler(Path(store_path))
+    return ThreadingHTTPServer((host, port), handler)
+
+
 def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
@@ -579,9 +667,8 @@ def serve(
 ) -> None:
     """Start the web server. Blocks until Ctrl-C."""
     store_path = Path(store_path)
-    handler = make_handler(store_path)
-    httpd = ThreadingHTTPServer((host, port), handler)
-    url = f"http://{host}:{port}"
+    httpd = build_server(host=host, port=port, store_path=store_path)
+    url = f"http://{host}:{httpd.server_address[1]}"
     print(f"finadvisor web UI: {url}")
     print(f"Data file: {store_path.resolve()}")
     print("Press Ctrl+C to stop.")
