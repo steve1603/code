@@ -354,6 +354,7 @@ class TransactionsSaveTests(WebTestBase):
             "amount_0": "45.00",
             "name_0": "USAA Card 6421",
             "kind_0": "credit_card",
+            "balance_0": "2500.00",   # user filled in balance on the row
             "select_0": "on",
 
             "amount_1": "8.07",       # Taco Bell — unchecked
@@ -379,6 +380,15 @@ class TransactionsSaveTests(WebTestBase):
         self.assertEqual(names, {"USAA Card 6421", "USAA Loan 3351"})
         card = next(d for d in state.debts if d.name == "USAA Card 6421")
         self.assertAlmostEqual(card.min_payment, 45.0)
+        # Balance filled in by user on the row flows through.
+        self.assertAlmostEqual(card.balance, 2500.0)
+        # APR defaults to the per-kind default (credit_card → 22%).
+        self.assertAlmostEqual(card.apr, 0.22)
+        loan = next(d for d in state.debts if d.name == "USAA Loan 3351")
+        # Balance left blank on the row → stays 0 (user will fill later).
+        self.assertEqual(loan.balance, 0.0)
+        # Personal loans default to 12%.
+        self.assertAlmostEqual(loan.apr, 0.12)
         self.assertEqual(state.budget.monthly_expenses, 8.07)
 
     def test_nothing_selected_and_no_expense_bump_flashes_error(self):

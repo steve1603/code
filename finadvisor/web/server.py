@@ -566,6 +566,7 @@ def make_handler(store_path: Path):
                     amount = _float(form, f"amount_{i}")
                 except ValueError:
                     amount = 0.0
+                balance = _opt_float(form, f"balance_{i}") or 0.0
                 if name in existing_names:
                     skipped += 1
                     continue
@@ -573,8 +574,8 @@ def make_handler(store_path: Path):
                     state.debts.append(Debt(
                         name=name,
                         kind=kind,
-                        balance=0.0,
-                        apr=0.0,
+                        balance=balance,
+                        apr=bank_statement.default_apr(kind),
                         min_payment=amount,
                     ))
                     existing_names.add(name)
@@ -603,8 +604,8 @@ def make_handler(store_path: Path):
             parts = []
             if added:
                 parts.append(
-                    f"imported {added} debt(s) — edit each to set "
-                    f"balance and APR"
+                    f"imported {added} debt(s) with a default APR by "
+                    f"kind — fill in Balance on any row you left blank"
                 )
             if skipped:
                 parts.append(f"{skipped} skipped (name already exists)")

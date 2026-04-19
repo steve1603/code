@@ -576,6 +576,8 @@ def render_transactions_confirm(
             f"{source_cell}"
             f'<td><input name="name_{i}" value="{_esc(name)}"></td>'
             f"<td>{kind_select}</td>"
+            f'<td><input name="balance_{i}" type="number" step="0.01" min="0"'
+            f' placeholder="e.g. 2500" style="width:110px"></td>'
             f"<td style=\"text-align:right\">{_money(tx.debit or 0)}</td>"
             f'<td class="muted" style="font-size:12px">{_esc(tx.description[:80])}</td>'
             f'<input type="hidden" name="amount_{i}" value="{tx.debit or 0}">'
@@ -627,6 +629,7 @@ def render_transactions_confirm(
   <table>
     <thead><tr>
       <th></th><th>Date</th>{source_header}<th>Debt name</th><th>Kind</th>
+      <th>Balance&nbsp;$</th>
       <th style="text-align:right">Amount</th><th>From description</th>
     </tr></thead>
     <tbody>{''.join(rows)}</tbody>
@@ -648,9 +651,10 @@ def render_transactions_confirm(
   </div>
   <p class="muted" style="margin-top:8px">
     Each imported transaction becomes a Debt with
-    <code>min_payment</code> set to the amount. Balance and APR are
-    left at 0 — edit them on the Debts page to get accurate payoff
-    recommendations.
+    <code>min_payment</code> set to the amount shown, and a default
+    APR chosen by kind (e.g. 22% for credit cards). Fill in Balance
+    now for accurate payoff math, or leave blank and edit later on
+    the Debts page.
   </p>
   <p style="margin-top:12px">
     <button type="submit">Import selected as debts</button>

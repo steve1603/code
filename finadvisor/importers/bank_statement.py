@@ -207,3 +207,21 @@ def looks_like_debt_payment(tx: Transaction) -> bool:
 
 # Re-exported for callers that want to validate a guessed kind.
 ALLOWED_KINDS = DEBT_KINDS
+
+
+# Reasonable rate-of-the-day defaults for each debt kind. These are
+# only used when a transaction gets imported as a new Debt — the user
+# can always edit afterwards. Keeping them here (not magic numbers in
+# the web handler) makes them easy to tune in one place.
+DEFAULT_APR_BY_KIND: dict[str, float] = {
+    "credit_card": 0.22,
+    "auto": 0.07,
+    "mortgage": 0.065,
+    "student_loan": 0.06,
+    "personal": 0.12,
+    "other": 0.10,
+}
+
+
+def default_apr(kind: str) -> float:
+    return DEFAULT_APR_BY_KIND.get(kind, DEFAULT_APR_BY_KIND["other"])
