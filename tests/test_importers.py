@@ -271,6 +271,104 @@ class BankStatementTests(unittest.TestCase):
         # Year dropped — date column stays MM/DD.
         self.assertEqual([t.date for t in txs], ["02/17", "03/05", "04/10"])
 
+    def test_full_usaa_statement_page(self):
+        """Literal text copy of a real USAA checking-statement page,
+        matching what pypdf emits for this exact layout. All 19
+        debits should parse cleanly, the two debt-related payments
+        should classify correctly, and the running balance should
+        line up on every row."""
+        page = (
+            "Transactions (continued)\n"
+            "Date Description Debits Credits Balance\n"
+            "02/17 DEBIT CARD PURCHASE 021426 5814021426 $8.07 $2,707.18\n"
+            "TACO BELL 037203 SUGAR LAND TX\n"
+            "02/17 DEBIT CARD PURCHASE 021526 5462021526 $18.89 $2,688.29\n"
+            "CRUMBL OMAHA NORTHWEST 180-14101313 UT\n"
+            "02/17 DEBIT CARD PURCHASE 021426 5814021426 $25.12 $2,663.17\n"
+            "TACO BELL 037203 SUGAR LAND TX\n"
+            "02/17 DEBIT CARD PURCHASE 021426 5813021426 $25.84 $2,637.33\n"
+            "TST* BARNATO LOUNGE OMAHA NE\n"
+            "02/17 POS DEBIT 021726 6051021726 $30.00 $2,607.33\n"
+            "VENMO* Steven Davis Visa Direct NY\n"
+            "02/17 DEBIT CARD PURCHASE 021426 5812021426 $30.93 $2,576.40\n"
+            "TST*THE GOOD LIFE SPORT Elkhorn NE\n"
+            "02/17 POS DEBIT 021626 5542021626 $35.78 $2,540.62\n"
+            "COSTCO GAS #1690 OMAHA NE\n"
+            "02/17 USAA CREDIT CARD PAYMENT $45.00 $2,495.62\n"
+            "CREDIT CARD ENDING IN 6421\n"
+            "02/17 USAA FUNDS TRANSFER DB $55.00 $2,440.62\n"
+            "TO Roxanne Davis\n"
+            "CHECKING #0861, CONF# 7315132095\n"
+            "02/17 DEBIT CARD PURCHASE 021426 5814021426 $61.45 $2,379.17\n"
+            "SONIC DRIVE IN #4587 402-431-1593 NE\n"
+            "02/17 POS DEBIT 021626 5300021626 $76.68 $2,302.49\n"
+            "COSTCO WHSE #1690 OMAHA NE\n"
+            "02/17 POS DEBIT 021426 5411021426 $77.00 $2,225.49\n"
+            "HY-VEE OMAHA 147 HY VEE OMAHA NE\n"
+            "02/17 POS DEBIT 021626 5200021626 $210.28 $2,015.21\n"
+            "THE HOME DEPOT #3201 OMAHA NE\n"
+            "02/17 USAA FUNDS TRANSFER DB $300.00 $1,715.21\n"
+            "TO Steven Davis\n"
+            "CHECKING #0861, CONF# 7317682567\n"
+            "02/17 POS DEBIT 021526 5300021526 $406.10 $1,309.11\n"
+            "COSTCO WHSE #1690 OMAHA NE\n"
+            "02/17 POS DEBIT 021626 5999021626 $409.24 $899.87\n"
+            "Harbor Freight Tools USA Omaha NE\n"
+            "02/17 USAA LOAN PAYMENT $542.12 $357.75\n"
+            "LOAN NUMBER ENDING IN 3351\n"
+            "02/18 DEBIT CARD PURCHASE 021826 5818021826 $7.37 $350.38\n"
+            "Prime Video Channels amzn.com/billWA\n"
+            "02/18 POS DEBIT 021826 5200021826 $17.09 $333.29\n"
+            "THE HOME DEPOT #3201 OMAHA NE\n"
+        )
+
+        # Detection should route this through the checklist flow.
+        self.assertTrue(self.bs.is_bank_statement(page))
+
+        txs = self.bs.parse_transactions(page)
+        # 19 dated debit rows on the page.
+        self.assertEqual(len(txs), 19)
+        # All 19 are debits; nothing should land in the credit column.
+        self.assertTrue(all(t.debit is not None for t in txs))
+        self.assertTrue(all(t.credit is None for t in txs))
+
+        # The two debt-related payments classify correctly and carry
+        # the "ending in NNNN" account hint.
+        card = next(t for t in txs if "CREDIT CARD PAYMENT" in t.description)
+        self.assertEqual(card.kind_guess, "credit_card")
+        self.assertEqual(card.account_hint, "6421")
+        self.assertAlmostEqual(card.debit, 45.00)
+        self.assertAlmostEqual(card.balance, 2495.62)
+
+        loan = next(t for t in txs if "LOAN PAYMENT" in t.description)
+        self.assertEqual(loan.kind_guess, "personal")
+        self.assertEqual(loan.account_hint, "3351")
+        self.assertAlmostEqual(loan.debit, 542.12)
+        self.assertAlmostEqual(loan.balance, 357.75)
+
+        # Only those two rows pre-select for import.
+        preselected = [t for t in txs if self.bs.looks_like_debt_payment(t)]
+        self.assertEqual(len(preselected), 2)
+
+        # Sanity: first debit $8.07 → balance $2,707.18,
+        # last debit $17.09 → balance $333.29.
+        self.assertAlmostEqual(txs[0].debit, 8.07)
+        self.assertAlmostEqual(txs[0].balance, 2707.18)
+        self.assertAlmostEqual(txs[-1].debit, 17.09)
+        self.assertAlmostEqual(txs[-1].balance, 333.29)
+
+        # Venmo transfer must NOT be miscategorized as a debt payment,
+        # even though the description contains "Visa" and "Direct".
+        venmo = next(t for t in txs if "VENMO" in t.description)
+        self.assertEqual(venmo.kind_guess, "other")
+
+        # Running-balance invariant: each debit subtracted from the
+        # previous balance equals this row's balance, within a cent.
+        for prev, cur in zip(txs, txs[1:]):
+            self.assertAlmostEqual(
+                prev.balance - cur.debit, cur.balance, places=2,
+            )
+
     def test_single_debt_statement_is_not_classified_as_bank(self):
         """Credit-card statements happen to list dates and amounts too;
         the detector must still reject them so they flow through the
