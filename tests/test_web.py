@@ -244,6 +244,66 @@ class CSVImportTests(WebTestBase):
         self.assertIn("Missing required columns", body)
 
 
+class SpendingRoutesTests(WebTestBase):
+    """Verify the /spending and /trends pages render with empty and
+    populated transaction ledgers, and that pasted statements flow into
+    the persisted spending data."""
+
+    SAMPLE = (
+        "Statement Period 02/01/2026 to 02/28/2026\n"
+        "USAA Federal Savings Bank\n"
+        "USAA CLASSIC CHECKING\n"
+        "Account Number: 123456789\n"
+        "Date Description Debits Credits Balance\n"
+        "02/02 PAYROLL DIRECT DEP $2500.00 $3000.00\n"
+        "02/05 DEBIT CARD PURCHASE TACO BELL $8.07 $2991.93\n"
+        "02/12 KROGER GROCERIES $124.33 $2867.60\n"
+        "02/17 USAA CREDIT CARD PAYMENT $45.00 $2822.60\n"
+        "CREDIT CARD ENDING IN 6421\n"
+        "02/20 NETFLIX SUBSCRIPTION $15.99 $2806.61\n"
+    )
+
+    def test_spending_empty_shows_welcome(self):
+        code, body = self.get("/spending")
+        self.assertEqual(code, 200)
+        self.assertIn("No transactions yet", body)
+
+    def test_trends_empty_shows_hint(self):
+        code, body = self.get("/trends")
+        self.assertEqual(code, 200)
+        self.assertIn("Not enough data", body)
+
+    def test_statement_paste_populates_spending(self):
+        # First, feed a statement through the paste route.
+        code, _ = self.post(
+            "/import/statement", {"statement": self.SAMPLE},
+        )
+        self.assertEqual(code, 200)
+        s = self.state()
+        self.assertGreater(len(s.transactions), 0)
+        self.assertGreaterEqual(len(s.accounts), 1)
+
+        code, body = self.get("/spending")
+        self.assertEqual(code, 200)
+        self.assertIn("Spending", body)
+        # Coach-notes block is always rendered once there's data.
+        self.assertIn("Coach notes", body)
+        # The latest-month by-category section should mention at least
+        # one of the canonical categories we seeded.
+        self.assertTrue(
+            "Groceries" in body
+            or "Subscriptions" in body
+            or "Dining" in body
+        )
+
+    def test_trends_renders_with_data(self):
+        self.post("/import/statement", {"statement": self.SAMPLE})
+        code, body = self.get("/trends")
+        self.assertEqual(code, 200)
+        self.assertIn("Trends", body)
+        self.assertIn("3-month projection", body)
+
+
 class StatementPasteTests(WebTestBase):
     """The /import/statement route parses transaction text and shows
     the same checklist as a PDF upload — without needing pypdf."""

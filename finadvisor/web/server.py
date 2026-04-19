@@ -25,8 +25,11 @@ from finadvisor.importers.csv_importer import (
     _guess_kind_from_name,
 )
 from finadvisor.importers import bank_statement, pdf_importer
-from finadvisor.models import Budget, Debt
+from finadvisor.models import (
+    Account, Budget, Debt, Transaction as StoredTransaction,
+)
 from finadvisor.report import run_all
+from finadvisor import spending as spending_module
 from finadvisor.web import templates
 
 
@@ -128,6 +131,57 @@ def _parse_multipart(content_type: str, body: bytes) -> tuple[
                 payload.decode("utf-8", errors="replace")
             )
     return fields, files
+
+
+def _ingest_statement(
+    text: str, source_name: str, state,
+) -> tuple[bank_statement.StatementMetadata, list, int]:
+    """Parse a statement's text into transactions and fold them into
+    `state` as Account + Transaction records.
+
+    Returns (metadata, parsed_bank_transactions, persisted_count). The
+    parsed list is kept in its original `bank_statement.Transaction`
+    shape so callers can still render the debt-payment checklist UI;
+    the persisted records are the spending ledger used by the /spending
+    page.
+    """
+    md = bank_statement.extract_metadata(text)
+    parsed = bank_statement.parse_transactions(text)
+
+    account_name = md.display_name if (md.institution or md.account_name) else source_name
+    state.upsert_account(Account(
+        name=account_name,
+        kind=md.account_kind or "checking",
+        institution=md.institution,
+        number_hint=md.account_last4,
+    ))
+
+    ledger: list[StoredTransaction] = []
+    for tx in parsed:
+        iso_date, amount, category = bank_statement.transaction_to_ledger(
+            tx, md, account_name,
+        )
+        try:
+            ledger.append(StoredTransaction(
+                date=iso_date,
+                account=account_name,
+                description=tx.description,
+                amount=amount,
+                category=category,
+                source=source_name,
+            ))
+        except ValueError:
+            # Malformed date or unknown category — skip rather than
+            # poison the whole import.
+            continue
+    persisted = state.add_transactions(ledger)
+
+    # Tag each bank_statement.Transaction with the account name so the
+    # debt-payment checklist can show it if multiple statements are
+    # being reviewed at once.
+    for tx in parsed:
+        tx.source = source_name  # type: ignore[attr-defined]
+    return md, parsed, persisted
 
 
 def _whatif_summary(extra: float, baseline, boosted) -> dict:
@@ -264,6 +318,42 @@ def make_handler(store_path: Path):
                     return self._html(
                         templates.render_analysis(
                             report, flash=flash, extra=extra, whatif=whatif,
+                        )
+                    )
+                if path == "/spending":
+                    state = self._state()
+                    summaries = spending_module.monthly_summaries(
+                        state.transactions
+                    )
+                    trends = spending_module.category_trends(
+                        state.transactions
+                    )
+                    insights = spending_module.build_insights(
+                        state.transactions, trends=trends,
+                    )
+                    per_account = (
+                        spending_module.totals_by_account(
+                            state.transactions, summaries[-1].month
+                        ) if summaries else {}
+                    )
+                    return self._html(
+                        templates.render_spending(
+                            state, summaries, insights, per_account,
+                            flash=flash,
+                        )
+                    )
+                if path == "/trends":
+                    state = self._state()
+                    trends = spending_module.category_trends(
+                        state.transactions
+                    )
+                    months = spending_module.months_of(state.transactions)
+                    projected = spending_module.projected_monthly_spending(
+                        state.transactions
+                    )
+                    return self._html(
+                        templates.render_trends(
+                            state, trends, months, projected, flash=flash,
                         )
                     )
                 if path == "/import":
@@ -464,6 +554,8 @@ def make_handler(store_path: Path):
             all_transactions: list = []
             single_extractions: list = []
             errors: list[str] = []
+            state = self._state()
+            total_persisted = 0
             for filename, payload in uploads:
                 stem = (
                     Path(filename).stem.replace("_", " ")
@@ -487,14 +579,19 @@ def make_handler(store_path: Path):
                         pass
                 extraction.suggested_name = stem
                 if bank_statement.is_bank_statement(extraction.raw_text):
-                    for tx in bank_statement.parse_transactions(
-                        extraction.raw_text
-                    ):
-                        # Attach source so the confirm page can show it.
-                        tx.source = stem  # type: ignore[attr-defined]
-                        all_transactions.append(tx)
+                    _md, parsed, persisted = _ingest_statement(
+                        extraction.raw_text, stem, state,
+                    )
+                    total_persisted += persisted
+                    all_transactions.extend(parsed)
                 else:
                     single_extractions.append(extraction)
+
+            # Persist the transaction ledger before we hand the UI off
+            # to the debt-payment checklist — spending data is valuable
+            # even if the user never confirms a debt row.
+            if total_persisted or state.accounts:
+                self._save(state)
 
             if errors and not all_transactions and not single_extractions:
                 # Collapse the N-times-repeated "pypdf is required"
@@ -647,9 +744,10 @@ def make_handler(store_path: Path):
                     "Paste some transaction text first.",
                 )
                 return self._redirect("/import")
-            transactions = bank_statement.parse_transactions(text)
-            for tx in transactions:
-                tx.source = "pasted"
+            state = self._state()
+            _md, transactions, persisted = _ingest_statement(
+                text, "pasted", state,
+            )
             debits = [t for t in transactions if t.debit is not None]
             if not debits:
                 _set_flash(
@@ -658,6 +756,8 @@ def make_handler(store_path: Path):
                     "make sure each line starts with MM/DD.",
                 )
                 return self._redirect("/import")
+            if persisted or state.accounts:
+                self._save(state)
             html = templates.render_transactions_confirm(
                 transactions, source_name="pasted",
             )

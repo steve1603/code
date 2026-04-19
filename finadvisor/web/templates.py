@@ -112,6 +112,8 @@ def _nav(active: str) -> str:
         ("dashboard", "/", "Dashboard"),
         ("debts", "/debts", "Debts"),
         ("budget", "/budget", "Budget"),
+        ("spending", "/spending", "Spending"),
+        ("trends", "/trends", "Trends"),
         ("analysis", "/analysis", "Analysis"),
         ("import", "/import", "Import"),
     ]
@@ -750,6 +752,241 @@ def render_pdf_confirm(extraction) -> str:
 {raw_section}
 """
     return render_page("import", "Confirm PDF", content)
+
+
+def _fmt_delta(value: float) -> str:
+    sign = "+" if value > 0 else ""
+    return f"{sign}{_money(value)}"
+
+
+def _severity_for(insight_severity: str) -> str:
+    return {
+        "good": "good",
+        "warn": "warn",
+        "urgent": "urgent",
+        "info": "info",
+    }.get(insight_severity, "info")
+
+
+def render_spending(
+    state: FinanceState,
+    summaries,
+    insights,
+    per_account,
+    flash: str = "",
+) -> str:
+    """Monthly cashflow view: headline cards + insight list + the most
+    recent month's by-category and by-account breakdowns."""
+    if not summaries:
+        content = (
+            "<h2>Spending</h2>"
+            '<div class="banner"><strong>No transactions yet</strong>'
+            'Import a bank statement on the '
+            '<a href="/import">Import</a> page and monthly spending '
+            'summaries will appear here.</div>'
+        )
+        return render_page("spending", "Spending", content, flash=flash)
+
+    latest = summaries[-1]
+    prev = summaries[-2] if len(summaries) >= 2 else None
+    income_delta = latest.income - prev.income if prev else 0.0
+    spend_delta = latest.spending - prev.spending if prev else 0.0
+
+    cards = [
+        ("Month", latest.month),
+        ("Income", _money(latest.income)),
+        ("Spending", _money(latest.spending)),
+        ("Net",
+         f"{_money(latest.net)}"
+         + ("" if not prev else f" ({_fmt_delta(latest.net - prev.net)} vs prev)")),
+        ("Transactions", str(latest.transaction_count)),
+        ("Accounts tracked", str(len(state.accounts))),
+    ]
+    if prev:
+        cards.insert(3, ("Income Δ", _fmt_delta(income_delta)))
+        cards.insert(5, ("Spending Δ", _fmt_delta(spend_delta)))
+    cards_html = "".join(
+        f'<div class="card"><div class="label">{_esc(label)}</div>'
+        f'<div class="value">{_esc(value)}</div></div>'
+        for label, value in cards
+    )
+
+    # Insights list, rendered as themed banners.
+    insights_html = ""
+    if insights:
+        banners = []
+        for ins in insights:
+            sev = _severity_for(ins.severity)
+            banners.append(
+                f'<div class="banner severity-{sev}">'
+                f'<strong>{_esc(ins.title)}</strong>'
+                f'{_esc(ins.detail)}</div>'
+            )
+        insights_html = (
+            '<h3 style="margin-top:24px">Coach notes</h3>' + "".join(banners)
+        )
+    else:
+        insights_html = (
+            '<h3 style="margin-top:24px">Coach notes</h3>'
+            '<p class="muted">Nothing urgent — add another month of '
+            'transactions for richer suggestions.</p>'
+        )
+
+    # This month's biggest spending categories.
+    by_cat = sorted(
+        (
+            (cat, v) for cat, v in latest.by_category.items()
+            if v > 0 and cat not in ("income", "transfer")
+        ),
+        key=lambda x: x[1], reverse=True,
+    )
+    max_v = by_cat[0][1] if by_cat else 1.0
+    cat_rows = []
+    for cat, v in by_cat:
+        pct = min(100.0, v / max_v * 100)
+        label = cat.replace("_", " ").title()
+        cat_rows.append(
+            f'<div style="margin-bottom:10px">'
+            f'<div style="display:flex;justify-content:space-between;'
+            f'font-size:13px;margin-bottom:3px">'
+            f'<strong>{_esc(label)}</strong>'
+            f'<span class="muted">{_money(v)}</span></div>'
+            f'<div class="bar bar-info"><span style="width:{pct:.1f}%"></span>'
+            f'</div></div>'
+        )
+    cat_html = (
+        f'<h3 style="margin-top:24px">This month by category — '
+        f'{_esc(latest.month)}</h3>'
+        + ("".join(cat_rows) if cat_rows
+           else '<p class="muted">No expense rows this month.</p>')
+    )
+
+    # Per-account summary for the current month (if there's more than one
+    # account, it's useful to see where the money's flowing).
+    acct_html = ""
+    if per_account and len(per_account) >= 2:
+        rows = "".join(
+            f"<tr><td>{_esc(name)}</td>"
+            f"<td>{_money(s.income)}</td>"
+            f"<td>{_money(s.spending)}</td>"
+            f"<td>{_money(s.net)}</td>"
+            f"<td>{s.transaction_count}</td></tr>"
+            for name, s in sorted(per_account.items())
+        )
+        acct_html = (
+            '<h3 style="margin-top:24px">By account</h3>'
+            "<table><thead><tr>"
+            "<th>Account</th><th>Income</th><th>Spending</th>"
+            "<th>Net</th><th>Txns</th>"
+            "</tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
+
+    # Recent months roll-up.
+    history_rows = []
+    for s in summaries[-6:][::-1]:
+        history_rows.append(
+            f"<tr><td>{_esc(s.month)}</td>"
+            f"<td>{_money(s.income)}</td>"
+            f"<td>{_money(s.spending)}</td>"
+            f"<td>{_money(s.net)}</td>"
+            f"<td>{s.transaction_count}</td></tr>"
+        )
+    history_html = (
+        '<h3 style="margin-top:24px">Last few months</h3>'
+        "<table><thead><tr>"
+        "<th>Month</th><th>Income</th><th>Spending</th>"
+        "<th>Net</th><th>Txns</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(history_rows)}</tbody></table>"
+    )
+
+    content = f"""
+<h2>Spending</h2>
+<div class="cards">{cards_html}</div>
+{insights_html}
+{cat_html}
+{acct_html}
+{history_html}
+"""
+    return render_page("spending", "Spending", content, flash=flash)
+
+
+def render_trends(
+    state: FinanceState,
+    trends,
+    months,
+    projected: float,
+    flash: str = "",
+) -> str:
+    """Category-by-category movement across every month on file."""
+    if not trends or not months:
+        content = (
+            "<h2>Trends</h2>"
+            '<div class="banner"><strong>Not enough data</strong>'
+            "Import at least one bank statement (two months is better) "
+            "and this page will show how each spending category is "
+            "moving month over month.</div>"
+        )
+        return render_page("trends", "Trends", content, flash=flash)
+
+    shown_months = months[-6:]
+    header_cells = "".join(f"<th>{_esc(m)}</th>" for m in shown_months)
+    rows = []
+    for t in trends:
+        if t.latest == 0 and t.rolling_3mo == 0 and t.previous == 0:
+            continue
+        month_cells = "".join(
+            f"<td>{_money(t.by_month.get(m, 0.0))}</td>" for m in shown_months
+        )
+        delta = t.delta_vs_prev
+        if delta > 0:
+            delta_cls = "severity-warn"
+            delta_arrow = "▲"
+        elif delta < 0:
+            delta_cls = "severity-good"
+            delta_arrow = "▼"
+        else:
+            delta_cls = "severity-info"
+            delta_arrow = "•"
+        delta_badge = (
+            f'<span class="banner {delta_cls}" '
+            f'style="display:inline-block;margin:0;padding:2px 8px;'
+            f'font-size:12px;border-radius:999px">'
+            f'{delta_arrow} {_fmt_delta(delta)}</span>'
+        )
+        rows.append(
+            f'<tr><td><strong>{_esc(t.category.replace("_", " ").title())}</strong></td>'
+            f"{month_cells}"
+            f"<td>{_money(t.rolling_3mo)}</td>"
+            f"<td>{delta_badge}</td>"
+            f"</tr>"
+        )
+
+    projection_banner = (
+        f'<div class="banner"><strong>3-month projection</strong>'
+        f'Average of your last three months of spending is '
+        f'{_money(projected)}/mo. Use this as a forward estimate when '
+        f'sizing extra debt payments or an emergency fund target.</div>'
+    )
+
+    content = f"""
+<h2>Trends</h2>
+{projection_banner}
+<div style="overflow-x:auto">
+<table>
+<thead><tr>
+<th>Category</th>{header_cells}<th>3-mo avg</th><th>Δ vs prev</th>
+</tr></thead>
+<tbody>{''.join(rows) if rows else '<tr><td colspan="9" class="muted">No category activity to show.</td></tr>'}</tbody>
+</table>
+</div>
+<p class="muted" style="margin-top:12px">
+Green ▼ means you spent less than last month; amber ▲ means you spent
+more. The 3-month average smooths out one-off bills.
+</p>
+"""
+    return render_page("trends", "Trends", content, flash=flash)
 
 
 def flash_success(msg: str) -> str:
