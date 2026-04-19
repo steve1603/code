@@ -138,5 +138,92 @@ class PDFExtractFromTextTests(unittest.TestCase):
         self.assertIsNone(result.apr)
 
 
+class BankStatementTests(unittest.TestCase):
+    """Parser smoke tests based on the checking-account format used by
+    USAA — Date / Description / Debits / Credits / Balance columns."""
+
+    SAMPLE = (
+        "Transactions (continued)\n"
+        "Date Description Debits Credits Balance\n"
+        "02/17 DEBIT CARD PURCHASE 021426 5814021426 $8.07 $2,707.18\n"
+        "TACO BELL 037203 SUGAR LAND TX\n"
+        "02/17 DEBIT CARD PURCHASE 021526 5462021526 $18.89 $2,688.29\n"
+        "CRUMBL OMAHA NORTHWEST 180-14101313 UT\n"
+        "02/17 POS DEBIT 021726 6051021726 $30.00 $2,607.33\n"
+        "VENMO* Steven Davis Visa Direct NY\n"
+        "02/17 USAA CREDIT CARD PAYMENT $45.00 $2,495.62\n"
+        "CREDIT CARD ENDING IN 6421\n"
+        "02/17 USAA LOAN PAYMENT $542.12 $357.75\n"
+        "LOAN NUMBER ENDING IN 3351\n"
+    )
+
+    def setUp(self):
+        from finadvisor.importers import bank_statement
+        self.bs = bank_statement
+
+    def test_detection(self):
+        self.assertTrue(self.bs.is_bank_statement(self.SAMPLE))
+        self.assertFalse(self.bs.is_bank_statement(
+            "Chase Freedom\nNew Balance: $100.00\n"
+        ))
+
+    def test_parses_every_debit_row(self):
+        txs = self.bs.parse_transactions(self.SAMPLE)
+        # Expect 5 rows (matching the 5 dated lines above).
+        self.assertEqual(len(txs), 5)
+        # Every row is a debit (no credits in this sample).
+        self.assertTrue(all(t.debit is not None for t in txs))
+        self.assertTrue(all(t.credit is None for t in txs))
+
+    def test_debit_and_balance_amounts(self):
+        txs = self.bs.parse_transactions(self.SAMPLE)
+        self.assertAlmostEqual(txs[0].debit, 8.07)
+        self.assertAlmostEqual(txs[0].balance, 2707.18)
+        self.assertAlmostEqual(txs[3].debit, 45.00)
+        self.assertAlmostEqual(txs[3].balance, 2495.62)
+        self.assertAlmostEqual(txs[4].debit, 542.12)
+
+    def test_classifies_debt_related_payments(self):
+        txs = self.bs.parse_transactions(self.SAMPLE)
+        card = next(t for t in txs if "CREDIT CARD PAYMENT" in t.description)
+        self.assertEqual(card.kind_guess, "credit_card")
+        self.assertEqual(card.account_hint, "6421")
+        loan = next(t for t in txs if "LOAN PAYMENT" in t.description)
+        self.assertEqual(loan.kind_guess, "personal")
+        self.assertEqual(loan.account_hint, "3351")
+        taco = next(t for t in txs if "TACO BELL" in t.description)
+        self.assertEqual(taco.kind_guess, "other")
+
+    def test_suggest_debt_name(self):
+        txs = self.bs.parse_transactions(self.SAMPLE)
+        card = next(t for t in txs if "CREDIT CARD PAYMENT" in t.description)
+        self.assertEqual(self.bs.suggest_debt_name(card), "Usaa Card 6421")
+        loan = next(t for t in txs if "LOAN PAYMENT" in t.description)
+        self.assertEqual(self.bs.suggest_debt_name(loan), "Usaa Loan 3351")
+
+    def test_looks_like_debt_payment(self):
+        txs = self.bs.parse_transactions(self.SAMPLE)
+        preselected = [t for t in txs if self.bs.looks_like_debt_payment(t)]
+        # Only the credit-card and loan payments should pre-select.
+        self.assertEqual(len(preselected), 2)
+        descs = {t.description for t in preselected}
+        self.assertTrue(any("CREDIT CARD PAYMENT" in d for d in descs))
+        self.assertTrue(any("LOAN PAYMENT" in d for d in descs))
+
+    def test_deposits_classified_as_credit(self):
+        text = (
+            "Transactions\n"
+            "Date Description Debits Credits Balance\n"
+            "02/15 DIRECT DEPOSIT PAYROLL $1,500.00 $5,000.00\n"
+        )
+        txs = self.bs.parse_transactions(text)
+        self.assertEqual(len(txs), 1)
+        self.assertIsNone(txs[0].debit)
+        self.assertAlmostEqual(txs[0].credit, 1500.0)
+
+    def test_empty_text(self):
+        self.assertEqual(self.bs.parse_transactions(""), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -512,6 +512,101 @@ Auto Loan,auto,12000,0.045,300,"></textarea>
     return render_page("import", "Import", content, flash=flash)
 
 
+def render_transactions_confirm(transactions, source_name: str = "") -> str:
+    """Checklist of bank-statement transactions to import as debts.
+
+    Each row has a checkbox, an editable name + kind dropdown, and a
+    hidden amount field. Debt-payment-looking rows (credit card / loan
+    payments) are pre-selected; all others default to unchecked so the
+    user isn't surprised by dozens of Taco Bell charges on the Debts
+    page.
+    """
+    from finadvisor.importers.bank_statement import (
+        suggest_debt_name, looks_like_debt_payment,
+    )
+
+    debits = [t for t in transactions if t.debit is not None]
+    total_debit = sum(t.debit or 0 for t in debits)
+    credits = [t for t in transactions if t.credit is not None]
+    total_credit = sum(t.credit or 0 for t in credits)
+
+    if not debits:
+        return render_page(
+            "import", "Confirm transactions",
+            "<h2>Confirm transactions</h2>"
+            "<p class=\"muted\">No debit transactions were found in "
+            "this statement.</p>",
+        )
+
+    rows = []
+    for i, tx in enumerate(debits):
+        preselect = "checked" if looks_like_debt_payment(tx) else ""
+        name = suggest_debt_name(tx)
+        kind_select = _kind_select(f"kind_{i}", tx.kind_guess)
+        rows.append(
+            "<tr>"
+            f'<td><input type="checkbox" name="select_{i}" {preselect}></td>'
+            f"<td>{_esc(tx.date)}</td>"
+            f'<td><input name="name_{i}" value="{_esc(name)}"></td>'
+            f"<td>{kind_select}</td>"
+            f"<td style=\"text-align:right\">{_money(tx.debit or 0)}</td>"
+            f'<td class="muted" style="font-size:12px">{_esc(tx.description[:80])}</td>'
+            f'<input type="hidden" name="amount_{i}" value="{tx.debit or 0}">'
+            "</tr>"
+        )
+
+    credits_note = ""
+    if credits:
+        credits_note = (
+            f'<p class="muted">{len(credits)} credit (deposit) '
+            f"transaction(s) totaling {_money(total_credit)} were also "
+            "detected and are not shown (deposits aren't debts).</p>"
+        )
+
+    content = f"""
+<h2>Confirm transactions</h2>
+<div class="banner severity-info">
+  <strong>Found {len(debits)} debit transactions</strong>
+  totaling {_money(total_debit)} in {_esc(source_name or "this statement")}.
+  Credit-card and loan payments are pre-selected. Review the list,
+  then import the ones you want as debts.
+</div>
+{credits_note}
+<form method="post" action="/import/pdf/transactions/save">
+  <p style="margin:12px 0">
+    <button type="button" class="secondary" onclick="
+      for(const c of document.querySelectorAll('input[type=checkbox][name^=select_]')) c.checked = true;
+      return false;
+    ">Select all</button>
+    <button type="button" class="secondary" onclick="
+      for(const c of document.querySelectorAll('input[type=checkbox][name^=select_]')) c.checked = false;
+      return false;
+    ">Clear all</button>
+  </p>
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr>
+      <th></th><th>Date</th><th>Debt name</th><th>Kind</th>
+      <th style="text-align:right">Amount</th><th>From description</th>
+    </tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+  </div>
+  <p class="muted" style="margin-top:8px">
+    Each imported transaction becomes a Debt with
+    <code>min_payment</code> set to the amount. Balance and APR are
+    left at 0 — edit them on the Debts page to get accurate payoff
+    recommendations.
+  </p>
+  <p style="margin-top:12px">
+    <button type="submit">Import selected as debts</button>
+    <a class="btn secondary" href="/import">Cancel</a>
+  </p>
+</form>
+"""
+    return render_page("import", "Confirm transactions", content)
+
+
 def render_pdf_confirm(extraction) -> str:
     """Show a prefilled form after a PDF upload so the user can edit
     fields before they're persisted as a Debt."""

@@ -24,7 +24,7 @@ from finadvisor.importers.csv_importer import (
     REQUIRED_COLUMNS,
     _guess_kind_from_name,
 )
-from finadvisor.importers import pdf_importer
+from finadvisor.importers import bank_statement, pdf_importer
 from finadvisor.models import Budget, Debt
 from finadvisor.report import run_all
 from finadvisor.web import templates
@@ -310,6 +310,8 @@ def make_handler(store_path: Path):
                     return self._post_import(form)
                 if path == "/import/pdf/save":
                     return self._post_pdf_save(form)
+                if path == "/import/pdf/transactions/save":
+                    return self._post_transactions_save(form)
                 self._html(
                     templates.render_page(
                         "", "Not found", "<h2>404</h2>"
@@ -476,9 +478,71 @@ def make_handler(store_path: Path):
             stem = Path(filename).stem.replace("_", " ").replace("-", " ").strip()
             if stem:
                 extraction.suggested_name = stem
+            # If the PDF looks like a bank statement (many dated debit
+            # lines) offer the user the transaction-picker flow instead
+            # of the single-debt confirm dialog.
+            if bank_statement.is_bank_statement(extraction.raw_text):
+                transactions = bank_statement.parse_transactions(
+                    extraction.raw_text
+                )
+                if transactions:
+                    return self._html(
+                        templates.render_transactions_confirm(
+                            transactions, source_name=stem or "statement",
+                        )
+                    )
             return self._html(
                 templates.render_pdf_confirm(extraction)
             )
+
+        def _post_transactions_save(self, form: dict[str, list[str]]) -> None:
+            # Find every selected row: checkbox name is `select_<index>`.
+            selected_indices = [
+                int(k.split("_", 1)[1])
+                for k in form.keys()
+                if k.startswith("select_") and k.split("_", 1)[1].isdigit()
+            ]
+            if not selected_indices:
+                _set_flash("error", "No transactions selected.")
+                return self._redirect("/import")
+            state = self._state()
+            existing_names = {d.name for d in state.debts}
+            added = skipped = 0
+            errors: list[str] = []
+            for i in sorted(selected_indices):
+                name = _str(form, f"name_{i}")
+                kind = _str(form, f"kind_{i}", "other")
+                try:
+                    amount = _float(form, f"amount_{i}")
+                except ValueError:
+                    amount = 0.0
+                # Dedupe by name: if the user already has that debt,
+                # skip rather than clobber.
+                if name in existing_names:
+                    skipped += 1
+                    continue
+                try:
+                    state.debts.append(Debt(
+                        name=name,
+                        kind=kind,
+                        balance=0.0,
+                        apr=0.0,
+                        min_payment=amount,
+                    ))
+                    existing_names.add(name)
+                    added += 1
+                except ValueError as e:
+                    errors.append(f"{name}: {e}")
+            self._save(state)
+            msg = f"Imported {added} transactions as debts"
+            if skipped:
+                msg += f" ({skipped} skipped — name already exists)"
+            if errors:
+                msg += f". Errors: {'; '.join(errors[:3])}"
+            _set_flash(
+                "error" if errors and added == 0 else "success", msg + "."
+            )
+            self._redirect("/debts")
 
         def _post_pdf_save(self, form: dict[str, list[str]]) -> None:
             state = self._state()
