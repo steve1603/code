@@ -196,21 +196,65 @@ def render_dashboard(state: FinanceState, report: Report, flash: str = "") -> st
         ]
     )
 
+    # Optional spending row — only rendered when the user has imported
+    # at least one month of transactions. Keeps the dashboard quiet for
+    # debt-only users.
+    spending_cards_html = ""
+    if state.transactions:
+        from finadvisor import spending as _sp  # local import to keep Qt-free
+        summaries = _sp.monthly_summaries(state.transactions)
+        if summaries:
+            latest = summaries[-1]
+            biggest = sorted(
+                (
+                    (c, v) for c, v in latest.by_category.items()
+                    if c not in ("income", "transfer") and v > 0
+                ),
+                key=lambda x: x[1], reverse=True,
+            )
+            top_cat = (
+                f"{biggest[0][0].replace('_', ' ').title()} "
+                f"({_money(biggest[0][1])})"
+                if biggest else "—"
+            )
+            spending_cards = [
+                (f"Spending — {latest.month}", _money(latest.spending)),
+                ("Net this month", _money(latest.net)),
+                ("Top category", top_cat),
+            ]
+            spending_cards_html = (
+                '<h3 style="margin-top:24px;margin-bottom:8px">'
+                'Spending snapshot</h3>'
+                '<div class="cards">'
+                + "".join(
+                    f'<div class="card"><div class="label">{_esc(label)}</div>'
+                    f'<div class="value">{_esc(value)}</div></div>'
+                    for label, value in spending_cards
+                )
+                + '</div>'
+                + '<p class="muted" style="margin-top:6px">'
+                '<a href="/spending">Details</a> · '
+                '<a href="/trends">Month-over-month trends</a></p>'
+            )
+
     banner = (
         '<div class="banner"><strong>Next best action</strong>'
         f"{_esc(report.next_best_action)}</div>"
     )
-    if not state.debts:
+    if not state.debts and not state.transactions:
         banner = (
             '<div class="banner"><strong>Welcome</strong>'
             "Head to the <a href=\"/debts\">Debts</a> page to add your first "
-            "debt — manually or via CSV import.</div>"
+            "debt — manually or via CSV import — or upload a bank "
+            "statement on the <a href=\"/import\">Import</a> page to "
+            "start tracking spending.</div>"
         )
 
     content = f"""
 <h2>Dashboard</h2>
 {banner}
 <div class="cards">{cards_html}</div>
+{spending_cards_html}
 """
     return render_page("dashboard", "Dashboard", content, flash=flash)
 
