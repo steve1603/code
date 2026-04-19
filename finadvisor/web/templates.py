@@ -148,7 +148,7 @@ def render_page(active: str, title: str, content: str, flash: str = "") -> str:
 </html>"""
 
 
-def render_dashboard(state: FinanceState, report: Report) -> str:
+def render_dashboard(state: FinanceState, report: Report, flash: str = "") -> str:
     def _find(prefix: str) -> StrategyResult | None:
         return next(
             (r for r in report.results if r.title.startswith(prefix)), None
@@ -210,28 +210,83 @@ def render_dashboard(state: FinanceState, report: Report) -> str:
 {banner}
 <div class="cards">{cards_html}</div>
 """
-    return render_page("dashboard", "Dashboard", content)
+    return render_page("dashboard", "Dashboard", content, flash=flash)
 
 
-def render_debts(debts: list[Debt]) -> str:
+_KIND_OPTIONS = [
+    ("credit_card", "Credit card"),
+    ("student_loan", "Student loan"),
+    ("auto", "Auto"),
+    ("mortgage", "Mortgage"),
+    ("personal", "Personal"),
+    ("other", "Other"),
+]
+
+
+def _kind_select(name: str = "kind", selected: str = "") -> str:
+    opts = "".join(
+        f'<option value="{v}"{" selected" if v == selected else ""}>'
+        f"{_esc(label)}</option>"
+        for v, label in _KIND_OPTIONS
+    )
+    return f'<select name="{name}">{opts}</select>'
+
+
+def _edit_row(d: Debt) -> str:
+    cl = "" if d.credit_limit is None else f"{d.credit_limit}"
+    return (
+        '<tr><td colspan="7" style="background:#eff6ff">'
+        '<form method="post" action="/debts/edit">'
+        f'<input type="hidden" name="orig_name" value="{_esc(d.name)}">'
+        '<div class="row">'
+        f'<div><label>Name</label><input name="name" value="{_esc(d.name)}" required></div>'
+        f'<div><label>Kind</label>{_kind_select("kind", d.kind)}</div>'
+        '</div>'
+        '<div class="row">'
+        f'<div><label>Balance ($)</label><input name="balance" type="number" step="0.01" min="0" value="{d.balance}" required></div>'
+        f'<div><label>APR (decimal)</label><input name="apr" type="number" step="0.0001" min="0" max="0.9999" value="{d.apr}" required></div>'
+        '</div>'
+        '<div class="row">'
+        f'<div><label>Minimum ($/mo)</label><input name="min_payment" type="number" step="0.01" min="0" value="{d.min_payment}" required></div>'
+        f'<div><label>Credit limit ($)</label><input name="credit_limit" type="number" step="0.01" min="0" value="{cl}"></div>'
+        '</div>'
+        '<p style="margin-top:12px">'
+        '<button type="submit">Save</button> '
+        '<a class="btn secondary" href="/debts">Cancel</a>'
+        '</p>'
+        '</form></td></tr>'
+    )
+
+
+def _display_row(d: Debt) -> str:
+    edit_url = f"/debts?edit={_esc(d.name)}"
+    return (
+        "<tr>"
+        f"<td>{_esc(d.name)}</td>"
+        f"<td>{_esc(d.kind)}</td>"
+        f"<td>{_money(d.balance)}</td>"
+        f"<td>{d.apr * 100:.2f}%</td>"
+        f"<td>{_money(d.min_payment)}</td>"
+        f"<td>{_money(d.credit_limit) if d.credit_limit else '—'}</td>"
+        "<td>"
+        f'<a class="btn secondary" href="{edit_url}">Edit</a> '
+        '<form method="post" action="/debts/delete" '
+        'style="display:inline;background:none;border:none;padding:0;margin:0;" '
+        f'onsubmit="return confirm(\'Delete {_esc(d.name)}?\');">'
+        f'<input type="hidden" name="name" value="{_esc(d.name)}">'
+        '<button type="submit" class="danger">Delete</button>'
+        "</form>"
+        "</td>"
+        "</tr>"
+    )
+
+
+def render_debts(
+    debts: list[Debt], edit_name: str | None = None, flash: str = ""
+) -> str:
     if debts:
         rows = "".join(
-            "<tr>"
-            f"<td>{_esc(d.name)}</td>"
-            f"<td>{_esc(d.kind)}</td>"
-            f"<td>{_money(d.balance)}</td>"
-            f"<td>{d.apr * 100:.2f}%</td>"
-            f"<td>{_money(d.min_payment)}</td>"
-            f"<td>{_money(d.credit_limit) if d.credit_limit else '—'}</td>"
-            f"<td>"
-            f'<form method="post" action="/debts/delete" '
-            f'style="display:inline;background:none;border:none;padding:0;margin:0;" '
-            f'onsubmit="return confirm(\'Delete {_esc(d.name)}?\');">'
-            f'<input type="hidden" name="name" value="{_esc(d.name)}">'
-            f'<button type="submit" class="danger">Delete</button>'
-            f"</form>"
-            f"</td>"
-            "</tr>"
+            _edit_row(d) if d.name == edit_name else _display_row(d)
             for d in debts
         )
         table = f"""
@@ -253,21 +308,12 @@ def render_debts(debts: list[Debt]) -> str:
         table = '<p class="muted">No debts yet. Add one below or import a CSV.</p>'
         summary = ""
 
-    add_form = """
+    add_form = f"""
 <h3>Add a debt</h3>
 <form method="post" action="/debts/add">
   <div class="row">
     <div><label>Name</label><input name="name" required></div>
-    <div><label>Kind</label>
-      <select name="kind">
-        <option value="credit_card">Credit card</option>
-        <option value="student_loan">Student loan</option>
-        <option value="auto">Auto</option>
-        <option value="mortgage">Mortgage</option>
-        <option value="personal">Personal</option>
-        <option value="other">Other</option>
-      </select>
-    </div>
+    <div><label>Kind</label>{_kind_select("kind", "credit_card")}</div>
   </div>
   <div class="row">
     <div><label>Balance ($)</label>
@@ -286,10 +332,10 @@ def render_debts(debts: list[Debt]) -> str:
 """
 
     content = f"<h2>Debts</h2>{summary}{table}{add_form}"
-    return render_page("debts", "Debts", content)
+    return render_page("debts", "Debts", content, flash=flash)
 
 
-def render_budget(state: FinanceState) -> str:
+def render_budget(state: FinanceState, flash: str = "") -> str:
     b = state.budget
     content = f"""
 <h2>Budget</h2>
@@ -323,11 +369,12 @@ def _strip_md(text: str) -> str:
     return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
 
 
-def render_analysis(report: Report) -> str:
+def render_analysis(report: Report, flash: str = "") -> str:
     if not report.results:
         return render_page(
             "analysis", "Analysis",
             "<h2>Analysis</h2><p>Add a debt first.</p>",
+            flash=flash,
         )
 
     sections = []
@@ -376,7 +423,7 @@ def render_analysis(report: Report) -> str:
 {_esc(report.next_best_action)}</div>
 {''.join(sections)}
 """
-    return render_page("analysis", "Analysis", content)
+    return render_page("analysis", "Analysis", content, flash=flash)
 
 
 def _render_schedule(schedule: list[dict]) -> str:
@@ -411,7 +458,7 @@ def _render_schedule(schedule: list[dict]) -> str:
     )
 
 
-def render_import(preview: str = "") -> str:
+def render_import(preview: str = "", flash: str = "") -> str:
     content = f"""
 <h2>Import CSV</h2>
 <p class="muted">Paste CSV content below. Required columns:
@@ -426,7 +473,7 @@ Auto Loan,auto,12000,0.045,300,"></textarea>
 </form>
 {preview}
 """
-    return render_page("import", "Import CSV", content)
+    return render_page("import", "Import CSV", content, flash=flash)
 
 
 def flash_success(msg: str) -> str:

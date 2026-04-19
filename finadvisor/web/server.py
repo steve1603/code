@@ -133,46 +133,36 @@ def make_handler(store_path: Path):
             try:
                 url = urlparse(self.path)
                 path = url.path
+                query = parse_qs(url.query)
+                flash = _pop_flash()
                 if path == "/" or path == "/dashboard":
                     state = self._state()
                     report = run_all(state)
-                    html = templates.render_dashboard(state, report)
                     return self._html(
-                        html.replace(
-                            "</main>", f"{_pop_flash()}</main>", 1
-                        )
+                        templates.render_dashboard(state, report, flash=flash)
                     )
                 if path == "/debts":
                     state = self._state()
-                    html = templates.render_debts(state.debts)
+                    edit = (query.get("edit", [""])[0] or "").strip() or None
                     return self._html(
-                        html.replace(
-                            "<main>", f"<main>{_pop_flash()}", 1
+                        templates.render_debts(
+                            state.debts, edit_name=edit, flash=flash
                         )
                     )
                 if path == "/budget":
                     state = self._state()
-                    html = templates.render_budget(state)
                     return self._html(
-                        html.replace(
-                            "<main>", f"<main>{_pop_flash()}", 1
-                        )
+                        templates.render_budget(state, flash=flash)
                     )
                 if path == "/analysis":
                     state = self._state()
                     report = run_all(state)
-                    html = templates.render_analysis(report)
                     return self._html(
-                        html.replace(
-                            "<main>", f"<main>{_pop_flash()}", 1
-                        )
+                        templates.render_analysis(report, flash=flash)
                     )
                 if path == "/import":
-                    html = templates.render_import()
                     return self._html(
-                        html.replace(
-                            "<main>", f"<main>{_pop_flash()}", 1
-                        )
+                        templates.render_import(flash=flash)
                     )
                 if path == "/healthz":
                     return self._html("ok")
@@ -199,6 +189,8 @@ def make_handler(store_path: Path):
                 form = self._read_form()
                 if path == "/debts/add":
                     return self._post_add_debt(form)
+                if path == "/debts/edit":
+                    return self._post_edit_debt(form)
                 if path == "/debts/delete":
                     return self._post_delete_debt(form)
                 if path == "/budget":
@@ -232,6 +224,41 @@ def make_handler(store_path: Path):
             state.debts.append(debt)
             self._save(state)
             _set_flash("success", f"Added {debt.name}.")
+            self._redirect("/debts")
+
+        def _post_edit_debt(self, form: dict[str, list[str]]) -> None:
+            orig = _str(form, "orig_name")
+            state = self._state()
+            idx = next(
+                (i for i, d in enumerate(state.debts) if d.name == orig), -1
+            )
+            if idx < 0:
+                _set_flash("error", f"No debt named {orig!r}.")
+                return self._redirect("/debts")
+            try:
+                new_debt = Debt(
+                    name=_str(form, "name"),
+                    kind=_str(form, "kind", "other"),
+                    balance=_float(form, "balance"),
+                    apr=_float(form, "apr"),
+                    min_payment=_float(form, "min_payment"),
+                    credit_limit=_opt_float(form, "credit_limit"),
+                )
+            except ValueError as e:
+                _set_flash("error", str(e))
+                return self._redirect(f"/debts?edit={orig}")
+            # Refuse to create a name collision with a *different* debt.
+            if new_debt.name != orig and any(
+                d.name == new_debt.name for d in state.debts
+            ):
+                _set_flash(
+                    "error",
+                    f"A debt named {new_debt.name!r} already exists.",
+                )
+                return self._redirect(f"/debts?edit={orig}")
+            state.debts[idx] = new_debt
+            self._save(state)
+            _set_flash("success", f"Updated {new_debt.name}.")
             self._redirect("/debts")
 
         def _post_delete_debt(self, form: dict[str, list[str]]) -> None:
