@@ -369,11 +369,26 @@ def _strip_md(text: str) -> str:
     return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
 
 
-def render_analysis(report: Report, flash: str = "") -> str:
+def render_analysis(
+    report: Report,
+    flash: str = "",
+    extra: float = 0.0,
+    whatif: dict | None = None,
+) -> str:
+    whatif_form = f"""
+<form method="get" action="/analysis" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+  <div style="flex:1 1 200px">
+    <label>What-if: extra $/month</label>
+    <input name="extra" type="number" step="10" min="0" value="{extra:.0f}">
+  </div>
+  <div><button type="submit">Recalculate</button></div>
+</form>
+"""
     if not report.results:
         return render_page(
             "analysis", "Analysis",
-            "<h2>Analysis</h2><p>Add a debt first.</p>",
+            f"<h2>Analysis</h2>{whatif_form}"
+            "<p>Add a debt first.</p>",
             flash=flash,
         )
 
@@ -417,8 +432,18 @@ def render_analysis(report: Report, flash: str = "") -> str:
             f'</section>'
         )
 
+    whatif_banner = ""
+    if whatif:
+        sev_cls = "severity-good" if whatif.get("months_saved", 0) or whatif.get("interest_saved", 0) > 1 else "severity-info"
+        whatif_banner = (
+            f'<div class="banner {sev_cls}"><strong>What-if</strong>'
+            f'{_esc(whatif["message"])}</div>'
+        )
+
     content = f"""
 <h2>Analysis</h2>
+{whatif_form}
+{whatif_banner}
 <div class="banner"><strong>Next best action</strong>
 {_esc(report.next_best_action)}</div>
 {''.join(sections)}

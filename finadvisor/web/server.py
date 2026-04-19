@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import traceback
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -89,6 +90,45 @@ def _str(form: dict[str, list[str]], key: str, default: str = "") -> str:
     return (form.get(key, [default])[0] or default).strip()
 
 
+def _whatif_summary(extra: float, baseline, boosted) -> dict:
+    def _av(report):
+        return next(
+            (r for r in report.results if r.title.startswith("Avalanche")),
+            None,
+        )
+    base_av = _av(baseline)
+    new_av = _av(boosted)
+    if not (base_av and new_av):
+        return {
+            "message": f"Extra ${extra:,.0f}/month — avalanche data "
+                       f"unavailable.",
+            "months_saved": 0, "interest_saved": 0.0,
+        }
+    base_months = int(base_av.metrics.get("months_to_payoff", 0))
+    new_months = int(new_av.metrics.get("months_to_payoff", 0))
+    base_interest = float(base_av.metrics.get("total_interest", 0.0))
+    new_interest = float(new_av.metrics.get("total_interest", 0.0))
+    months_saved = max(0, base_months - new_months)
+    interest_saved = max(0.0, base_interest - new_interest)
+    if months_saved == 0 and interest_saved < 1:
+        msg = (
+            f"Extra ${extra:,.0f}/month — no measurable change yet. "
+            f"Try a larger amount."
+        )
+    else:
+        word = "month" if months_saved == 1 else "months"
+        msg = (
+            f"Sending an extra ${extra:,.0f}/month under Avalanche "
+            f"finishes {months_saved} {word} sooner and saves "
+            f"${interest_saved:,.2f} in interest."
+        )
+    return {
+        "message": msg,
+        "months_saved": months_saved,
+        "interest_saved": interest_saved,
+    }
+
+
 def make_handler(store_path: Path):
     """Build a request handler bound to a specific JSON store path."""
 
@@ -156,9 +196,30 @@ def make_handler(store_path: Path):
                     )
                 if path == "/analysis":
                     state = self._state()
-                    report = run_all(state)
+                    try:
+                        extra = float(query.get("extra", ["0"])[0] or 0)
+                    except ValueError:
+                        extra = 0.0
+                    extra = max(0.0, extra)
+                    baseline = run_all(state)
+                    whatif = None
+                    if extra > 0:
+                        boosted = replace(
+                            state,
+                            budget=Budget(
+                                monthly_income=state.budget.monthly_income + extra,
+                                monthly_expenses=state.budget.monthly_expenses,
+                            ),
+                        )
+                        boosted_report = run_all(boosted)
+                        whatif = _whatif_summary(extra, baseline, boosted_report)
+                        report = boosted_report
+                    else:
+                        report = baseline
                     return self._html(
-                        templates.render_analysis(report, flash=flash)
+                        templates.render_analysis(
+                            report, flash=flash, extra=extra, whatif=whatif,
+                        )
                     )
                 if path == "/import":
                     return self._html(
