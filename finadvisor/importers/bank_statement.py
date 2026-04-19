@@ -27,31 +27,73 @@ class Transaction:
     account_hint: str = ""  # e.g. "6421" (last 4 of a card/loan number)
 
 
-# Header / structural phrases that strongly indicate a checking-account
-# statement rather than a single-debt statement.
+# Header / structural phrases that hint at a checking-account ledger
+# rather than a single-debt statement. pypdf's text extraction can
+# flatten columns into one long line, so these intentionally match
+# anywhere in the text.
 _BANK_STATEMENT_SIGNALS = [
-    re.compile(r"\bTransactions\b.*\bDebits\b.*\bCredits\b.*\bBalance\b",
-               re.IGNORECASE | re.DOTALL),
-    re.compile(r"\bDate\b\s*\bDescription\b\s*\bDebits\b", re.IGNORECASE),
+    re.compile(r"\bTransactions?\b", re.IGNORECASE),
+    re.compile(r"\bDebits?\s+Credits?\b", re.IGNORECASE),
     re.compile(r"\bPOS\s+DEBIT\b", re.IGNORECASE),
     re.compile(r"\bDEBIT\s+CARD\s+PURCHASE\b", re.IGNORECASE),
+    re.compile(r"\b(previous|beginning|ending|available)\s+balance\b",
+               re.IGNORECASE),
+    re.compile(r"\bstatement\s+period\b", re.IGNORECASE),
+    re.compile(r"\b(deposit|withdrawal|transfer)\b", re.IGNORECASE),
+    re.compile(r"\bACH\s+(credit|debit)\b", re.IGNORECASE),
+]
+
+# A date like "02/17" or "2/17/2024" — we only need month/day, so the
+# year (if present) is an optional suffix captured and discarded.
+_DATE = re.compile(r"\b(\d{1,2}/\d{1,2})(?:/\d{2,4})?\b")
+# Single-debt-statement disqualifiers: if these are present, the file
+# is almost certainly a card/loan statement, not a bank ledger.
+_SINGLE_DEBT_SIGNALS = [
+    re.compile(r"\bNew\s+Balance\b", re.IGNORECASE),
+    re.compile(r"\bMinimum\s+Payment\s+Due\b", re.IGNORECASE),
+    re.compile(r"\bCredit\s+Limit\b", re.IGNORECASE),
+    re.compile(r"\bPurchase\s+APR\b", re.IGNORECASE),
+    re.compile(r"\bPrincipal\s+Balance\b", re.IGNORECASE),
 ]
 
 
 def is_bank_statement(text: str) -> bool:
-    """True if the raw PDF text looks like a transaction ledger."""
+    """True if the raw PDF text looks like a transaction ledger.
+
+    Deliberately permissive: pypdf's extraction often reflows columns
+    into one long line, losing the tidy "Date Description Debits
+    Credits Balance" header. We take any structural signal OR enough
+    date+amount density as evidence, and disqualify single-debt
+    statements (cards/loans) that happen to list a few dates.
+    """
     if not text:
         return False
-    # Any one strong signal plus at least 3 date-prefixed lines.
-    signal = any(p.search(text) for p in _BANK_STATEMENT_SIGNALS)
-    date_lines = len(re.findall(r"^\s*\d{2}/\d{2}\b", text, re.MULTILINE))
-    return signal and date_lines >= 3
+    # If the text shouts that it's a single-debt statement, bail out
+    # early so we don't mis-route a credit-card bill through the
+    # checklist flow.
+    single_debt_hits = sum(
+        1 for p in _SINGLE_DEBT_SIGNALS if p.search(text)
+    )
+    if single_debt_hits >= 2:
+        return False
+
+    signal_hits = sum(
+        1 for p in _BANK_STATEMENT_SIGNALS if p.search(text)
+    )
+    dates = len(_DATE.findall(text))
+    amounts = len(_AMOUNT.findall(text))
+    # Either (a) we see an explicit signal and a few dated rows, or
+    # (b) the text is dense with dates and dollar amounts — typical
+    # of a checking-account transaction list.
+    return (
+        (signal_hits >= 1 and dates >= 3 and amounts >= 3)
+        or (dates >= 5 and amounts >= 6)
+    )
 
 
 # A dollar amount like "$1,234.56" or "1234.56" — the decimal part is
 # required so we don't match arbitrary integers in the description.
 _AMOUNT = re.compile(r"\$?(-?[\d,]+\.\d{2})")
-_DATE_PREFIX = re.compile(r"^\s*(\d{2}/\d{2})\s+(.*)$")
 
 
 # Description classifiers — first match wins. Patterns are intentionally
@@ -105,71 +147,64 @@ def _clean_description(raw: str) -> str:
 
 
 def parse_transactions(text: str) -> list[Transaction]:
-    """Extract every dated line from the ledger.
+    """Extract every dated transaction from the ledger text.
 
-    Returns one Transaction per row. Multi-line descriptions (the
-    second line carrying a merchant name under the debit-card header)
-    are folded into the preceding transaction.
+    pypdf often flattens a statement's rows into one long line with
+    every column value run together, so a line-anchored parser misses
+    everything. Instead we find every date token (MM/DD or MM/DD/YYYY)
+    and treat the span between one date and the next as a single
+    transaction — that's robust to line breaks, reordered columns,
+    and inline continuation text.
     """
     if not text:
         return []
 
-    raw_lines = text.splitlines()
-    # First pass: group wrap-around description continuation lines onto
-    # whichever transaction row they belong to.
-    rows: list[str] = []
-    for line in raw_lines:
-        if _DATE_PREFIX.match(line):
-            rows.append(line.rstrip())
-        elif rows and line.strip():
-            # Only treat as continuation if the previous row hasn't yet
-            # had a balance attached — simple heuristic: if the row
-            # already contains 2+ money amounts, it's probably closed.
-            if len(_AMOUNT.findall(rows[-1])) >= 2:
-                # Still append — some statements spread descriptions
-                # below the amount line.
-                rows[-1] += " " + line.strip()
-            else:
-                rows[-1] += " " + line.strip()
+    matches = list(_DATE.finditer(text))
+    if not matches:
+        return []
 
     transactions: list[Transaction] = []
-    for row in rows:
-        m = _DATE_PREFIX.match(row)
-        if not m:
-            continue
-        date = m.group(1)
-        body = m.group(2)
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[start:end]
 
         amounts = _AMOUNT.findall(body)
+        if not amounts:
+            continue
         amount_floats = [float(a.replace(",", "")) for a in amounts]
 
-        # Strip every dollar amount from the text to get a clean description.
+        # Drop every dollar amount to recover a clean description.
         desc = _AMOUNT.sub("", body)
         desc = _clean_description(desc)
+        if not desc:
+            # Probably an opening/closing-balance row with only amounts.
+            continue
 
         debit = credit = balance = None
         is_credit = _is_credit_line(desc)
         if len(amount_floats) >= 2:
-            # Last amount is the running balance.
             balance = amount_floats[-1]
-            # First amount is the transaction value; wording tells us
-            # which column it belongs to.
             if is_credit:
                 credit = amount_floats[0]
             else:
                 debit = amount_floats[0]
-            # A third amount means both columns had a value — rare but
-            # handle it.
             if len(amount_floats) >= 3:
+                # Some formats put both debit and credit columns on the
+                # same row; whichever is non-zero is what we want.
                 credit = amount_floats[1]
-        elif len(amount_floats) == 1:
-            # Just a balance row (opening/closing); skip.
-            continue
         else:
-            continue
+            # Single amount — no running-balance column. Still useful:
+            # the amount IS the transaction value; assume debit unless
+            # description sounds like a deposit.
+            value = amount_floats[0]
+            if is_credit:
+                credit = value
+            else:
+                debit = value
 
         transactions.append(Transaction(
-            date=date,
+            date=m.group(1),
             description=desc,
             debit=debit,
             credit=credit,

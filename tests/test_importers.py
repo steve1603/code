@@ -224,6 +224,72 @@ class BankStatementTests(unittest.TestCase):
     def test_empty_text(self):
         self.assertEqual(self.bs.parse_transactions(""), [])
 
+    def test_detects_linearized_pypdf_output(self):
+        """pypdf often concatenates the whole statement onto one line;
+        detection must still kick in without a clean Date/Description
+        header structure."""
+        flat = (
+            "USAA Checking Statement Period 02/01 to 02/28 Available "
+            "Balance $1,234.56 02/03 DEBIT CARD PURCHASE AMAZON $42.10 "
+            "$4,200.00 02/05 POS DEBIT KROGER $85.22 $4,114.78 02/08 "
+            "USAA CREDIT CARD PAYMENT ENDING IN 6421 $120.00 $3,994.78 "
+            "02/12 DEBIT CARD PURCHASE SHELL $40.00 $3,954.78 02/18 "
+            "DIRECT DEPOSIT PAYROLL $2,500.00 $6,454.78"
+        )
+        self.assertTrue(self.bs.is_bank_statement(flat))
+
+    def test_parses_linearized_pypdf_output(self):
+        """All six dated rows should be recovered even with no line
+        breaks between them."""
+        flat = (
+            "02/03 DEBIT CARD PURCHASE AMAZON $42.10 $4,200.00 "
+            "02/05 POS DEBIT KROGER $85.22 $4,114.78 "
+            "02/08 USAA CREDIT CARD PAYMENT ENDING IN 6421 $120.00 $3,994.78 "
+            "02/12 DEBIT CARD PURCHASE SHELL $40.00 $3,954.78 "
+            "02/18 DIRECT DEPOSIT PAYROLL $2,500.00 $6,454.78 "
+            "02/28 USAA AUTO LOAN PAYMENT ENDING IN 3351 $310.45 $6,144.33"
+        )
+        txs = self.bs.parse_transactions(flat)
+        self.assertEqual(len(txs), 6)
+        amazon = next(t for t in txs if "AMAZON" in t.description)
+        self.assertAlmostEqual(amazon.debit, 42.10)
+        self.assertAlmostEqual(amazon.balance, 4200.00)
+        card = next(t for t in txs if "CREDIT CARD PAYMENT" in t.description)
+        self.assertEqual(card.kind_guess, "credit_card")
+        self.assertEqual(card.account_hint, "6421")
+        payroll = next(t for t in txs if "PAYROLL" in t.description)
+        self.assertIsNone(payroll.debit)
+        self.assertAlmostEqual(payroll.credit, 2500.0)
+
+    def test_dates_with_year_are_normalized(self):
+        text = (
+            "02/17/2026 AMAZON $42.10 $4,200.00\n"
+            "03/05/2026 SHELL $40.00 $4,160.00\n"
+            "04/10/2026 ACH CREDIT PAYROLL $2,500.00 $6,660.00\n"
+        )
+        txs = self.bs.parse_transactions(text)
+        # Year dropped — date column stays MM/DD.
+        self.assertEqual([t.date for t in txs], ["02/17", "03/05", "04/10"])
+
+    def test_single_debt_statement_is_not_classified_as_bank(self):
+        """Credit-card statements happen to list dates and amounts too;
+        the detector must still reject them so they flow through the
+        single-debt confirm path."""
+        cc = (
+            "Chase Freedom Unlimited\n"
+            "Statement Period 01/15 to 02/14\n"
+            "Previous Balance: $1,000.00\n"
+            "New Balance: $1,234.56\n"
+            "Minimum Payment Due: $25.00\n"
+            "Credit Limit: $10,000\n"
+            "Purchase APR: 19.99%\n"
+            "Transactions:\n"
+            "01/20 AMAZON $42.10\n"
+            "01/22 TARGET $85.22\n"
+            "02/05 SHELL $40.00\n"
+        )
+        self.assertFalse(self.bs.is_bank_statement(cc))
+
 
 if __name__ == "__main__":
     unittest.main()
