@@ -26,6 +26,46 @@ def run(debts: list[Debt], budget: Budget, state: FinanceState) -> StrategyResul
     surplus = budget.extra_payment_capacity(debts)
     dti = total_minimums / budget.monthly_income if budget.monthly_income else 0.0
 
+    # Negative amortization: if a debt's minimum payment doesn't even cover
+    # its monthly interest, the balance grows forever at that payment level.
+    # This is the single most destructive pattern a consumer can be in, so we
+    # escalate to URGENT regardless of other cashflow signals.
+    underwater = [
+        d for d in debts
+        if d.balance > 0 and d.min_payment < d.balance * d.apr / 12.0
+    ]
+    if underwater:
+        names = ", ".join(d.name for d in underwater)
+        monthly_interest_owed = sum(
+            d.balance * d.apr / 12.0 for d in underwater
+        )
+        summary = (
+            f"Negative amortization on {len(underwater)} debt(s): {names}. "
+            f"Their minimum payments don't cover {_money(monthly_interest_owed)} "
+            f"in monthly interest, so the balances grow every month even if "
+            f"you pay exactly the minimum."
+        )
+        recs = [
+            f"Treat {names} as emergencies — any extra dollar above the "
+            f"minimum reduces the balance, nothing below does.",
+            "Call the lender to request a hardship reduction or switch to "
+            "a fixed payoff plan.",
+            "Consider a lower-APR consolidation loan for these balances "
+            "specifically (see the Consolidation tab).",
+        ]
+        return StrategyResult(
+            title="Budget / cashflow",
+            summary=summary,
+            recommendations=recs,
+            severity=Severity.URGENT,
+            metrics={
+                "dti": dti,
+                "surplus": surplus,
+                "total_minimums": total_minimums,
+                "underwater_debts": float(len(underwater)),
+            },
+        )
+
     if surplus < 0:
         summary = (
             f"You're short {_money(-surplus)} per month — even paying just "

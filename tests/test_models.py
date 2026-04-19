@@ -63,11 +63,17 @@ class FinanceStateTests(unittest.TestCase):
             debts=[Debt(name="x", kind="other", balance=100, apr=0.1, min_payment=5)],
             budget=Budget(monthly_income=1000, monthly_expenses=500),
             consolidation_apr=0.08,
+            current_savings=750.0,
         )
         reloaded = FinanceState.from_dict(state.to_dict())
         self.assertEqual(len(reloaded.debts), 1)
         self.assertEqual(reloaded.budget.monthly_income, 1000)
         self.assertAlmostEqual(reloaded.consolidation_apr, 0.08)
+        self.assertAlmostEqual(reloaded.current_savings, 750.0)
+
+    def test_rejects_negative_savings(self):
+        with self.assertRaises(ValueError):
+            FinanceState(current_savings=-1.0)
 
 
 if __name__ == "__main__":

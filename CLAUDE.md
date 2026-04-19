@@ -8,7 +8,7 @@ recommendations. See `README.md` for user-facing docs.
 ## Verifying changes
 
 **Always run the unit test suite before reporting a task complete.** The
-core engine is Qt-free and fast (<1s for all 26 tests):
+core engine is Qt-free and fast (<1s for all 43 tests):
 
 ```bash
 python -m unittest discover tests/ -v
@@ -37,7 +37,14 @@ every dependency these commands need on Claude Code on the web.
   the GUI catches these and shows a `QMessageBox`.
 - `finadvisor/strategies/` — each module exposes
   `run(debts, budget, state) -> StrategyResult`. Keep the signature
-  stable; `report.run_all` iterates over `STRATEGY_MODULES`.
+  stable; `report.run_all` iterates over `STRATEGY_MODULES`. Current
+  list: avalanche, snowball, consolidation, budget, utilization,
+  emergency_fund, long_term (7 tabs in the Analysis page).
+- `StrategyResult` has optional `schedule` (monthly payoff snapshots)
+  and `breakdown` (per-item bars the Analysis page renders as colored
+  horizontal progress indicators). Populate whichever fits.
+- `FinanceState.current_savings` is a validated float for the emergency
+  fund; edited on the Budget page.
 - `finadvisor/strategies/_simulate.py` — shared month-by-month payoff
   simulator used by avalanche and snowball. If you change amortization
   logic, update both strategies' tests together.

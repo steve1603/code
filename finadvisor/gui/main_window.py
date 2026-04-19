@@ -4,11 +4,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QStackedWidget,
     QStatusBar,
     QWidget,
@@ -34,6 +37,7 @@ class MainWindow(QMainWindow):
         self.state: FinanceState = storage.load(self.store_path)
 
         self._build_ui()
+        self._build_menu()
 
         # Whenever any page mutates self.state, it emits state_changed; we
         # persist and ask every page to refresh.
@@ -74,6 +78,75 @@ class MainWindow(QMainWindow):
         status = QStatusBar()
         self.setStatusBar(status)
         self._update_statusbar()
+
+    def _build_menu(self) -> None:
+        menu = self.menuBar()
+        file_menu = menu.addMenu("&File")
+
+        open_act = QAction("&Open data file…", self)
+        open_act.setShortcut(QKeySequence.Open)
+        open_act.triggered.connect(self._on_menu_open)
+        file_menu.addAction(open_act)
+
+        save_as_act = QAction("&Save a copy as…", self)
+        save_as_act.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        save_as_act.triggered.connect(self._on_menu_save_as)
+        file_menu.addAction(save_as_act)
+
+        file_menu.addSeparator()
+        quit_act = QAction("&Quit", self)
+        quit_act.setShortcut(QKeySequence.Quit)
+        quit_act.triggered.connect(self.close)
+        file_menu.addAction(quit_act)
+
+        help_menu = menu.addMenu("&Help")
+        about_act = QAction("&About finadvisor", self)
+        about_act.triggered.connect(self._on_menu_about)
+        help_menu.addAction(about_act)
+
+    def _on_menu_open(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open finadvisor data file",
+            str(Path(self.store_path).parent),
+            "JSON (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            new_state = storage.load(Path(path))
+        except Exception as e:
+            QMessageBox.warning(self, "Could not open", str(e))
+            return
+        self.store_path = Path(path)
+        self.state = new_state
+        self._update_statusbar()
+        for i in range(self.pages.count()):
+            widget = self.pages.widget(i)
+            if hasattr(widget, "refresh"):
+                widget.refresh()
+
+    def _on_menu_save_as(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save a copy",
+            str(Path.cwd() / "finances-copy.json"),
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        try:
+            storage.save(self.state, Path(path))
+            QMessageBox.information(self, "Saved", f"Copy written to {path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Could not save", str(e))
+
+    def _on_menu_about(self) -> None:
+        QMessageBox.about(
+            self, "About finadvisor",
+            "<h3>finadvisor</h3>"
+            "<p>A local personal debt-advisor. All data stays on your "
+            "computer; no network calls.</p>"
+            "<p><i>Educational tool only — not licensed financial advice.</i></p>",
+        )
 
     def _on_nav(self, row: int) -> None:
         self.pages.setCurrentIndex(row)

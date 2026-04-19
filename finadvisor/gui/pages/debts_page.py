@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -79,6 +80,12 @@ class DebtsPage(QWidget):
         self.table.doubleClicked.connect(lambda _ix: self._on_edit())
         root.addWidget(self.table, 1)
 
+        # Summary footer
+        self.summary = QLabel()
+        self.summary.setObjectName("sectionTitle")
+        self.summary.setWordWrap(True)
+        root.addWidget(self.summary)
+
         # Wiring
         self.btn_add.clicked.connect(self._on_add)
         self.btn_edit.clicked.connect(self._on_edit)
@@ -87,9 +94,41 @@ class DebtsPage(QWidget):
         self.btn_import_pdf.clicked.connect(self._on_import_pdf)
         self.btn_export.clicked.connect(self._on_export)
 
+        # Keyboard shortcuts
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self._on_add)
+        QShortcut(QKeySequence("Ctrl+I"), self, activated=self._on_import_csv)
+        QShortcut(QKeySequence("Ctrl+Shift+I"), self, activated=self._on_import_pdf)
+        QShortcut(QKeySequence(Qt.Key_Delete), self.table, activated=self._on_delete)
+        QShortcut(QKeySequence("Return"), self.table, activated=self._on_edit)
+
+        self.btn_add.setToolTip("Add a debt (Ctrl+N)")
+        self.btn_import_csv.setToolTip("Import CSV (Ctrl+I)")
+        self.btn_import_pdf.setToolTip("Import PDF (Ctrl+Shift+I)")
+        self.btn_delete.setToolTip("Delete selected (Del)")
+        self.btn_edit.setToolTip("Edit selected (Enter)")
+
+        self._update_summary()
+
     # --- helpers --------------------------------------------------------
     def refresh(self) -> None:
         self.model.set_debts(self.window_.state.debts)
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        debts = self.window_.state.debts
+        if not debts:
+            self.summary.setText("")
+            return
+        total_balance = sum(d.balance for d in debts)
+        total_minimums = sum(d.min_payment for d in debts)
+        total_monthly_interest = sum(
+            d.balance * d.apr / 12.0 for d in debts
+        )
+        self.summary.setText(
+            f"{len(debts)} debt(s) • balance ${total_balance:,.2f} • "
+            f"minimums ${total_minimums:,.2f}/mo • "
+            f"accrued interest ${total_monthly_interest:,.2f}/mo"
+        )
 
     def _selected_row(self) -> int:
         idx = self.table.currentIndex()
