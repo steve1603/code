@@ -497,7 +497,19 @@ def make_handler(store_path: Path):
                     single_extractions.append(extraction)
 
             if errors and not all_transactions and not single_extractions:
-                _set_flash("error", " / ".join(errors))
+                # Collapse the N-times-repeated "pypdf is required"
+                # error into one actionable message pointing at the
+                # paste-text alternative.
+                if all("pypdf is required" in e for e in errors):
+                    _set_flash(
+                        "error",
+                        "pypdf isn't installed, so PDF parsing is "
+                        "disabled. Either run 'pip install pypdf' and "
+                        "retry, or use the 'Or paste bank-statement "
+                        "text' box below (works with no extra deps).",
+                    )
+                else:
+                    _set_flash("error", " / ".join(errors))
                 return self._redirect("/import")
 
             if all_transactions:

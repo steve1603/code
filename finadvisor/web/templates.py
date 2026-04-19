@@ -113,7 +113,7 @@ def _nav(active: str) -> str:
         ("debts", "/debts", "Debts"),
         ("budget", "/budget", "Budget"),
         ("analysis", "/analysis", "Analysis"),
-        ("import", "/import", "Import CSV"),
+        ("import", "/import", "Import"),
     ]
     parts = []
     for key, url, label in links:
