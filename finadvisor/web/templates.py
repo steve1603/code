@@ -485,20 +485,105 @@ def _render_schedule(schedule: list[dict]) -> str:
 
 def render_import(preview: str = "", flash: str = "") -> str:
     content = f"""
-<h2>Import CSV</h2>
-<p class="muted">Paste CSV content below. Required columns:
-<code>name, balance, apr, min_payment</code>. The <code>kind</code>
-column is optional — if omitted, it's inferred from the name.</p>
+<h2>Import</h2>
+
+<h3>Upload a PDF statement</h3>
+<p class="muted">Pick a credit-card or loan statement PDF. We'll extract
+balance, APR, minimum payment, and credit limit (best effort). You'll
+get a confirmation screen to correct anything before saving.</p>
+<form method="post" action="/import/pdf" enctype="multipart/form-data">
+  <label>PDF file</label>
+  <input type="file" name="pdf" accept="application/pdf,.pdf" required>
+  <p style="margin-top:12px"><button type="submit">Upload &amp; parse</button></p>
+</form>
+
+<h3 style="margin-top:24px">Or paste CSV</h3>
+<p class="muted">Required columns: <code>name, balance, apr, min_payment</code>.
+The <code>kind</code> column is optional — if omitted, it's inferred from the name.</p>
 <form method="post" action="/import">
   <label>CSV content</label>
   <textarea name="csv" placeholder="name,kind,balance,apr,min_payment,credit_limit
 Visa,credit_card,4000,0.2499,100,5000
 Auto Loan,auto,12000,0.045,300,"></textarea>
-  <p style="margin-top:12px"><button type="submit">Import</button></p>
+  <p style="margin-top:12px"><button type="submit">Import CSV</button></p>
 </form>
 {preview}
 """
-    return render_page("import", "Import CSV", content, flash=flash)
+    return render_page("import", "Import", content, flash=flash)
+
+
+def render_pdf_confirm(extraction) -> str:
+    """Show a prefilled form after a PDF upload so the user can edit
+    fields before they're persisted as a Debt."""
+    name = extraction.suggested_name or "Imported debt"
+    kind = extraction.guessed_kind or "credit_card"
+    balance = extraction.balance if extraction.balance is not None else ""
+    apr = extraction.apr if extraction.apr is not None else ""
+    min_pmt = extraction.min_payment if extraction.min_payment is not None else ""
+    cl = extraction.credit_limit if extraction.credit_limit is not None else ""
+
+    found = []
+    if extraction.balance is not None:
+        found.append("balance")
+    if extraction.apr is not None:
+        found.append("APR")
+    if extraction.min_payment is not None:
+        found.append("minimum payment")
+    if extraction.credit_limit is not None:
+        found.append("credit limit")
+    if found:
+        banner_text = "Extracted: " + ", ".join(found) + ". Verify and edit below."
+        sev = "severity-good"
+    else:
+        banner_text = (
+            "No fields extracted automatically. Fill them in below using "
+            "the raw text as reference."
+        )
+        sev = "severity-warn"
+
+    raw_section = ""
+    if extraction.raw_text:
+        raw_section = (
+            '<details style="margin-top:16px"><summary class="muted">'
+            'Show raw text from PDF</summary>'
+            f'<pre style="white-space:pre-wrap;font-size:12px;'
+            f'background:#f3f4f6;padding:12px;border-radius:6px">'
+            f'{_esc(extraction.raw_text)}</pre></details>'
+        )
+
+    content = f"""
+<h2>Confirm imported debt</h2>
+<div class="banner {sev}">{_esc(banner_text)}</div>
+<form method="post" action="/import/pdf/save">
+  <div class="row">
+    <div><label>Name</label>
+      <input name="name" value="{_esc(name)}" required></div>
+    <div><label>Kind</label>{_kind_select("kind", kind)}</div>
+  </div>
+  <div class="row">
+    <div><label>Balance ($)</label>
+      <input name="balance" type="number" step="0.01" min="0"
+             value="{balance}" required></div>
+    <div><label>APR (decimal)</label>
+      <input name="apr" type="number" step="0.0001" min="0" max="0.9999"
+             value="{apr}" required></div>
+  </div>
+  <div class="row">
+    <div><label>Minimum payment ($/mo)</label>
+      <input name="min_payment" type="number" step="0.01" min="0"
+             value="{min_pmt}" required></div>
+    <div><label>Credit limit ($)</label>
+      <input name="credit_limit" type="number" step="0.01" min="0"
+             value="{cl}"></div>
+  </div>
+  <p style="margin-top:12px">
+    <button type="submit">Save debt</button>
+    <a class="btn secondary" href="/import">Cancel</a>
+  </p>
+</form>
+{raw_section}
+"""
+    return render_page("import", "Confirm PDF", content)
 
 
 def flash_success(msg: str) -> str:

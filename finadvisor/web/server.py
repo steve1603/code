@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import csv
 import io
+import tempfile
 import traceback
 from dataclasses import replace
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +24,7 @@ from finadvisor.importers.csv_importer import (
     REQUIRED_COLUMNS,
     _guess_kind_from_name,
 )
+from finadvisor.importers import pdf_importer
 from finadvisor.models import Budget, Debt
 from finadvisor.report import run_all
 from finadvisor.web import templates
@@ -90,6 +94,42 @@ def _str(form: dict[str, list[str]], key: str, default: str = "") -> str:
     return (form.get(key, [default])[0] or default).strip()
 
 
+def _parse_multipart(content_type: str, body: bytes) -> tuple[
+    dict[str, list[str]], dict[str, list[tuple[str, bytes]]]
+]:
+    """Parse a multipart/form-data body using stdlib email.parser.
+
+    Returns (text fields, file fields). File field values are
+    (filename, raw bytes) tuples.
+    """
+    # Build a synthetic email message: headers then body.
+    raw = (
+        f"Content-Type: {content_type}\r\n"
+        f"MIME-Version: 1.0\r\n\r\n"
+    ).encode() + body
+    msg = BytesParser(policy=email_default_policy).parsebytes(raw)
+    fields: dict[str, list[str]] = {}
+    files: dict[str, list[tuple[str, bytes]]] = {}
+    if not msg.is_multipart():
+        return fields, files
+    for part in msg.iter_parts():
+        disp = part.get("Content-Disposition", "")
+        if "form-data" not in disp:
+            continue
+        name = part.get_param("name", header="Content-Disposition")
+        if not name:
+            continue
+        filename = part.get_param("filename", header="Content-Disposition")
+        payload = part.get_payload(decode=True) or b""
+        if filename:
+            files.setdefault(name, []).append((filename, payload))
+        else:
+            fields.setdefault(name, []).append(
+                payload.decode("utf-8", errors="replace")
+            )
+    return fields, files
+
+
 def _whatif_summary(extra: float, baseline, boosted) -> dict:
     def _av(report):
         return next(
@@ -155,11 +195,16 @@ def make_handler(store_path: Path):
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-        def _read_form(self) -> dict[str, list[str]]:
+        def _read_body(self) -> bytes:
             length = int(self.headers.get("Content-Length", "0") or 0)
             if length <= 0:
+                return b""
+            return self.rfile.read(length)
+
+        def _read_form(self) -> dict[str, list[str]]:
+            raw = self._read_body().decode("utf-8", errors="replace")
+            if not raw:
                 return {}
-            raw = self.rfile.read(length).decode("utf-8", errors="replace")
             return parse_qs(raw, keep_blank_values=True)
 
         def _state(self):
@@ -247,6 +292,11 @@ def make_handler(store_path: Path):
         def do_POST(self) -> None:  # noqa: N802
             try:
                 path = urlparse(self.path).path
+                ctype = self.headers.get("Content-Type", "")
+                # Multipart routes (file upload) read the body raw.
+                if path == "/import/pdf":
+                    return self._post_pdf_upload(ctype)
+                # All other POSTs use urlencoded forms.
                 form = self._read_form()
                 if path == "/debts/add":
                     return self._post_add_debt(form)
@@ -258,6 +308,8 @@ def make_handler(store_path: Path):
                     return self._post_budget(form)
                 if path == "/import":
                     return self._post_import(form)
+                if path == "/import/pdf/save":
+                    return self._post_pdf_save(form)
                 self._html(
                     templates.render_page(
                         "", "Not found", "<h2>404</h2>"
@@ -383,6 +435,74 @@ def make_handler(store_path: Path):
                 "success",
                 f"Imported CSV: {added} added, {updated} updated.",
             )
+            self._redirect("/debts")
+
+        def _post_pdf_upload(self, content_type: str) -> None:
+            if not content_type.lower().startswith("multipart/form-data"):
+                _set_flash("error", "PDF upload requires a multipart form.")
+                return self._redirect("/import")
+            body = self._read_body()
+            try:
+                _, files = _parse_multipart(content_type, body)
+            except Exception as e:
+                _set_flash("error", f"Could not parse upload: {e}")
+                return self._redirect("/import")
+            uploads = files.get("pdf") or []
+            if not uploads or not uploads[0][0]:
+                _set_flash("error", "No PDF file selected.")
+                return self._redirect("/import")
+            filename, payload = uploads[0]
+            if not payload:
+                _set_flash("error", "Uploaded PDF was empty.")
+                return self._redirect("/import")
+            # pypdf reads from a path, so write to a temp file.
+            with tempfile.NamedTemporaryFile(
+                suffix=".pdf", delete=False
+            ) as tmp:
+                tmp.write(payload)
+                tmp_path = Path(tmp.name)
+            try:
+                extraction = pdf_importer.parse(tmp_path)
+            except pdf_importer.PDFImportError as e:
+                _set_flash("error", str(e))
+                return self._redirect("/import")
+            finally:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            # Override the filename-derived suggested name with the actual
+            # uploaded filename (the temp name would otherwise leak through).
+            stem = Path(filename).stem.replace("_", " ").replace("-", " ").strip()
+            if stem:
+                extraction.suggested_name = stem
+            return self._html(
+                templates.render_pdf_confirm(extraction)
+            )
+
+        def _post_pdf_save(self, form: dict[str, list[str]]) -> None:
+            state = self._state()
+            try:
+                debt = Debt(
+                    name=_str(form, "name"),
+                    kind=_str(form, "kind", "other"),
+                    balance=_float(form, "balance"),
+                    apr=_float(form, "apr"),
+                    min_payment=_float(form, "min_payment"),
+                    credit_limit=_opt_float(form, "credit_limit"),
+                )
+            except ValueError as e:
+                _set_flash("error", str(e))
+                return self._redirect("/import")
+            existing = {d.name: i for i, d in enumerate(state.debts)}
+            if debt.name in existing:
+                state.debts[existing[debt.name]] = debt
+                msg = f"Updated {debt.name} from PDF."
+            else:
+                state.debts.append(debt)
+                msg = f"Added {debt.name} from PDF."
+            self._save(state)
+            _set_flash("success", msg)
             self._redirect("/debts")
 
     return Handler
