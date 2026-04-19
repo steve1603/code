@@ -509,6 +509,19 @@ get a confirmation screen to correct anything before saving.</p>
   <p style="margin-top:12px"><button type="submit">Upload &amp; parse</button></p>
 </form>
 
+<h3 style="margin-top:24px">Or paste bank-statement text</h3>
+<p class="muted">If PDF parsing fails for your bank, open the statement
+in any reader, copy the transaction table, and paste it here. Same
+checklist flow as the upload path.</p>
+<form method="post" action="/import/statement">
+  <label>Transaction text</label>
+  <textarea name="statement" placeholder="Date Description Debits Credits Balance
+02/17 DEBIT CARD PURCHASE TACO BELL $8.07 $2,707.18
+02/17 USAA CREDIT CARD PAYMENT $45.00 $2,495.62
+CREDIT CARD ENDING IN 6421"></textarea>
+  <p style="margin-top:12px"><button type="submit">Parse transactions</button></p>
+</form>
+
 <h3 style="margin-top:24px">Or paste CSV</h3>
 <p class="muted">Required columns: <code>name, balance, apr, min_payment</code>.
 The <code>kind</code> column is optional — if omitted, it's inferred from the name.</p>

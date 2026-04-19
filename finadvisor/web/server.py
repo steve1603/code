@@ -308,6 +308,8 @@ def make_handler(store_path: Path):
                     return self._post_budget(form)
                 if path == "/import":
                     return self._post_import(form)
+                if path == "/import/statement":
+                    return self._post_statement_paste(form)
                 if path == "/import/pdf/save":
                     return self._post_pdf_save(form)
                 if path == "/import/pdf/transactions/save":
@@ -620,6 +622,34 @@ def make_handler(store_path: Path):
                 "error" if errors and added == 0 else "success", msg,
             )
             self._redirect("/debts")
+
+        def _post_statement_paste(
+            self, form: dict[str, list[str]]
+        ) -> None:
+            """Parse a pasted-in bank statement exactly like an uploaded
+            PDF — same checklist confirmation page."""
+            text = form.get("statement", [""])[0]
+            if not text.strip():
+                _set_flash(
+                    "error",
+                    "Paste some transaction text first.",
+                )
+                return self._redirect("/import")
+            transactions = bank_statement.parse_transactions(text)
+            for tx in transactions:
+                tx.source = "pasted"
+            debits = [t for t in transactions if t.debit is not None]
+            if not debits:
+                _set_flash(
+                    "error",
+                    "No dated debit rows found in the pasted text — "
+                    "make sure each line starts with MM/DD.",
+                )
+                return self._redirect("/import")
+            html = templates.render_transactions_confirm(
+                transactions, source_name="pasted",
+            )
+            return self._html(html)
 
         def _post_pdf_save(self, form: dict[str, list[str]]) -> None:
             state = self._state()

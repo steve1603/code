@@ -244,6 +244,38 @@ class CSVImportTests(WebTestBase):
         self.assertIn("Missing required columns", body)
 
 
+class StatementPasteTests(WebTestBase):
+    """The /import/statement route parses transaction text and shows
+    the same checklist as a PDF upload — without needing pypdf."""
+
+    SAMPLE = (
+        "Date Description Debits Credits Balance\n"
+        "02/17 DEBIT CARD PURCHASE 021426 TACO BELL $8.07 $2,707.18\n"
+        "02/17 USAA CREDIT CARD PAYMENT $45.00 $2,495.62\n"
+        "CREDIT CARD ENDING IN 6421\n"
+        "02/17 USAA LOAN PAYMENT $542.12 $357.75\n"
+        "LOAN NUMBER ENDING IN 3351\n"
+    )
+
+    def test_paste_renders_checklist(self):
+        code, body = self.post("/import/statement", {"statement": self.SAMPLE})
+        self.assertEqual(code, 200)
+        self.assertIn("Confirm transactions", body)
+        self.assertIn("Found 3 debit transactions", body)
+        self.assertIn("Usaa Card 6421", body)
+
+    def test_paste_empty_text_flashes_error(self):
+        _, body = self.post("/import/statement", {"statement": "   "})
+        self.assertIn("Paste some transaction text", body)
+
+    def test_paste_no_debits_flashes_error(self):
+        _, body = self.post(
+            "/import/statement",
+            {"statement": "no dates here\njust some text\n"},
+        )
+        self.assertIn("No dated debit rows", body)
+
+
 class PDFUploadTests(WebTestBase):
     """Exercise the multipart upload flow with a stubbed pdf_importer."""
 
