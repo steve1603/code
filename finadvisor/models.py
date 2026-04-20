@@ -16,6 +16,22 @@ DEBT_KINDS = (
 )
 
 
+# Primary financial goals the advisor can optimize around. The user
+# picks one on the Dashboard; every recommendation (debt split,
+# savings cap, cut order) is weighted by this choice.
+PRIMARY_GOALS = (
+    "pay_off_debt",     # avalanche-first, minimal savings beyond $1k starter
+    "build_savings",    # 6-mo emergency fund before extra debt paydown
+    "balanced",         # split surplus 50/50 between debt and savings
+)
+
+
+# How loud / specific the advisor should be. "Prescriptive" shows exact
+# dollar amounts and categorical cut targets. "Directional" keeps hints
+# in % and ranges. "Both" mixes the two — the default.
+GUIDANCE_STYLES = ("both", "prescriptive", "directional")
+
+
 # Spending categories are a closed set so the UI can render consistent
 # colors and the trend view can diff them across months.
 SPENDING_CATEGORIES = (
@@ -265,11 +281,28 @@ class FinanceState:
     accounts: list[Account] = field(default_factory=list)
     transactions: list[Transaction] = field(default_factory=list)
     category_rules: list[CategoryRule] = field(default_factory=list)
+    household_size: int = 1
+    primary_goal: str = "pay_off_debt"
+    guidance_style: str = "both"
 
     def __post_init__(self) -> None:
         if self.current_savings < 0:
             raise ValueError(
                 f"current_savings cannot be negative (got {self.current_savings})."
+            )
+        if self.household_size < 1:
+            raise ValueError(
+                f"household_size must be >= 1 (got {self.household_size})."
+            )
+        if self.primary_goal not in PRIMARY_GOALS:
+            raise ValueError(
+                f"Unknown primary_goal {self.primary_goal!r}. "
+                f"Must be one of: {', '.join(PRIMARY_GOALS)}."
+            )
+        if self.guidance_style not in GUIDANCE_STYLES:
+            raise ValueError(
+                f"Unknown guidance_style {self.guidance_style!r}. "
+                f"Must be one of: {', '.join(GUIDANCE_STYLES)}."
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -281,6 +314,9 @@ class FinanceState:
             "accounts": [a.to_dict() for a in self.accounts],
             "transactions": [t.to_dict() for t in self.transactions],
             "category_rules": [r.to_dict() for r in self.category_rules],
+            "household_size": self.household_size,
+            "primary_goal": self.primary_goal,
+            "guidance_style": self.guidance_style,
         }
 
     @classmethod
@@ -298,6 +334,9 @@ class FinanceState:
                 CategoryRule.from_dict(x)
                 for x in d.get("category_rules", [])
             ],
+            household_size=int(d.get("household_size", 1)),
+            primary_goal=str(d.get("primary_goal", "pay_off_debt")),
+            guidance_style=str(d.get("guidance_style", "both")),
         )
 
     def total_debt(self) -> float:

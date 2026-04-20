@@ -125,7 +125,46 @@ def _nav(active: str) -> str:
     return f"<nav>{''.join(parts)}</nav>"
 
 
-def render_page(active: str, title: str, content: str, flash: str = "") -> str:
+# Module-level alarm slot: server sets this once per request before
+# rendering, so every page's render_page call picks it up without
+# having to thread a kwarg through every renderer signature.
+_ALARM: dict[str, tuple[bool, float, float] | None] = {"v": None}
+
+
+def set_alarm(alarm: tuple[bool, float, float] | None) -> None:
+    _ALARM["v"] = alarm
+
+
+def _cashflow_alarm_banner(alarm: tuple[bool, float, float] | None) -> str:
+    """Site-wide red banner when rolling spending exceeds income.
+
+    Rendered above every page's main content so the user can't navigate
+    past a bleeding budget without seeing it.
+    """
+    if not alarm or not alarm[0]:
+        return ""
+    _is_negative, income, spending = alarm
+    gap = spending - income
+    return (
+        '<div class="banner severity-urgent" style="margin-top:0">'
+        '<strong>Spending exceeds income</strong>'
+        f'Last 3 months averaged <strong>${spending:,.0f}/mo</strong> out '
+        f'vs <strong>${income:,.0f}/mo</strong> in — a '
+        f'<strong>${gap:,.0f}/mo</strong> shortfall. '
+        'Cut from <a href="/budget">wants</a> first; debt plans only '
+        'work in the black.'
+        '</div>'
+    )
+
+
+def render_page(
+    active: str,
+    title: str,
+    content: str,
+    flash: str = "",
+    alarm: tuple[bool, float, float] | None = None,
+) -> str:
+    effective_alarm = alarm if alarm is not None else _ALARM.get("v")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -140,6 +179,7 @@ def render_page(active: str, title: str, content: str, flash: str = "") -> str:
   {_nav(active)}
 </header>
 <main>
+  {_cashflow_alarm_banner(effective_alarm)}
   {flash}
   {content}
   <p class="muted" style="margin-top:32px">
@@ -151,7 +191,149 @@ def render_page(active: str, title: str, content: str, flash: str = "") -> str:
 </html>"""
 
 
-def render_dashboard(state: FinanceState, report: Report, flash: str = "") -> str:
+_GOAL_OPTIONS = [
+    ("pay_off_debt", "Pay off debt (avalanche-first)"),
+    ("build_savings", "Build emergency savings"),
+    ("balanced", "Balanced (split debt + savings 50/50)"),
+]
+
+_HOUSEHOLD_OPTIONS = [
+    (1, "1 (single earner)"),
+    (2, "2 (dual income)"),
+    (3, "3"),
+    (4, "4"),
+    (5, "5+"),
+]
+
+
+def _render_goal_picker(state: FinanceState) -> str:
+    goal_opts = "".join(
+        f'<option value="{v}"{" selected" if v == state.primary_goal else ""}>'
+        f'{_esc(label)}</option>'
+        for v, label in _GOAL_OPTIONS
+    )
+    house_opts = "".join(
+        f'<option value="{v}"'
+        f'{" selected" if v == state.household_size else ""}>'
+        f'{_esc(label)}</option>'
+        for v, label in _HOUSEHOLD_OPTIONS
+    )
+    return f"""
+<form method="post" action="/settings/goal"
+      style="background:white;border:1px solid #e5e7eb;border-radius:10px;
+             padding:14px 16px;margin:12px 0;display:flex;
+             flex-wrap:wrap;gap:12px;align-items:end">
+  <div style="flex:1 1 240px">
+    <label style="font-size:11px;text-transform:uppercase;
+                  letter-spacing:0.5px;color:#6b7280;font-weight:700">
+      Primary goal
+    </label>
+    <select name="primary_goal">{goal_opts}</select>
+  </div>
+  <div style="flex:0 1 160px">
+    <label style="font-size:11px;text-transform:uppercase;
+                  letter-spacing:0.5px;color:#6b7280;font-weight:700">
+      Household size
+    </label>
+    <select name="household_size">{house_opts}</select>
+  </div>
+  <div><button type="submit">Save goal</button></div>
+</form>
+"""
+
+
+def _render_cash_plan(plan) -> str:
+    """Monthly Cash Plan card — the autonomous core."""
+    if plan is None:
+        return ""
+
+    debt_rows = ""
+    if plan.debt_plan:
+        rows = []
+        for d in plan.debt_plan:
+            apr_str = f"{d.apr * 100:.1f}%"
+            extra_cell = (
+                f'<strong style="color:#059669">+${d.extra:,.0f}</strong>'
+                if d.extra > 0 else '<span class="muted">—</span>'
+            )
+            rows.append(
+                f'<tr><td><strong>{_esc(d.name)}</strong> '
+                f'<span class="muted">· {_esc(d.kind.replace("_", " "))}'
+                f' · {apr_str}</span></td>'
+                f'<td style="text-align:right">${d.min_payment:,.0f}</td>'
+                f'<td style="text-align:right">{extra_cell}</td>'
+                f'<td style="text-align:right"><strong>'
+                f'${d.total:,.0f}</strong></td></tr>'
+            )
+        debt_rows = f"""
+<div style="overflow-x:auto;margin-top:12px">
+<table style="margin:0">
+  <thead><tr>
+    <th>Debt</th>
+    <th style="text-align:right">Minimum</th>
+    <th style="text-align:right">Extra</th>
+    <th style="text-align:right">Pay this month</th>
+  </tr></thead>
+  <tbody>{"".join(rows)}</tbody>
+</table>
+</div>
+"""
+
+    allocation_cards = "".join(
+        f'<div class="card"><div class="label">{_esc(label)}</div>'
+        f'<div class="value">{_esc(value)}</div></div>'
+        for label, value in [
+            ("Income (take-home)", f"${plan.income:,.0f}"),
+            ("Essentials cap", f"${plan.essentials_cap:,.0f}"),
+            ("Save", f"${plan.savings_target:,.0f}"),
+            ("Debt minimums", f"${plan.debt_minimums:,.0f}"),
+            ("Extra to debt", f"${plan.extra_to_debt:,.0f}"),
+        ]
+    )
+
+    notes_html = ""
+    if plan.notes:
+        notes_html = (
+            '<ul class="recs" style="margin-top:10px">'
+            + "".join(f'<li>{_esc(n)}</li>' for n in plan.notes)
+            + '</ul>'
+        )
+
+    sev = (
+        "severity-urgent" if plan.shortfall > 0
+        else "severity-good" if plan.extra_to_debt > 0 or plan.savings_target > 0
+        else "severity-info"
+    )
+
+    return f"""
+<section style="background:white;border:1px solid #e5e7eb;
+                border-radius:10px;padding:16px;margin:16px 0">
+  <h3 style="margin-top:0;display:flex;align-items:center;
+             justify-content:space-between;flex-wrap:wrap;gap:8px">
+    <span>Monthly Cash Plan</span>
+    <span class="muted" style="font-size:12px;font-weight:500">
+      Goal: {_esc(plan.goal.replace("_", " ").title())}
+    </span>
+  </h3>
+  <div class="banner {sev}" style="margin:0 0 12px 0">
+    {_esc(plan.headline)}
+  </div>
+  <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+    {allocation_cards}
+  </div>
+  {debt_rows}
+  {notes_html}
+</section>
+"""
+
+
+def render_dashboard(
+    state: FinanceState,
+    report: Report,
+    flash: str = "",
+    cash_plan=None,
+    alarm: tuple[bool, float, float] | None = None,
+) -> str:
     def _find(prefix: str) -> StrategyResult | None:
         return next(
             (r for r in report.results if r.title.startswith(prefix)), None
@@ -251,13 +433,20 @@ def render_dashboard(state: FinanceState, report: Report, flash: str = "") -> st
             "start tracking spending.</div>"
         )
 
+    goal_picker = _render_goal_picker(state)
+    cash_plan_html = _render_cash_plan(cash_plan)
+
     content = f"""
 <h2>Dashboard</h2>
 {banner}
+{cash_plan_html}
+{goal_picker}
 <div class="cards">{cards_html}</div>
 {spending_cards_html}
 """
-    return render_page("dashboard", "Dashboard", content, flash=flash)
+    return render_page(
+        "dashboard", "Dashboard", content, flash=flash, alarm=alarm,
+    )
 
 
 _KIND_OPTIONS = [

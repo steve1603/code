@@ -643,6 +643,94 @@ class AnalysisAutoPopulateTests(WebTestBase):
         self.assertIn("Auto-filled from your budget surplus", body)
 
 
+class DashboardCashPlanTests(WebTestBase):
+    """The Dashboard renders the Monthly Cash Plan card + goal picker
+    whenever there are transactions + debts on file."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = []
+        for month in ("2026-01", "2026-02"):
+            txs.extend([
+                Transaction(date=f"{month}-03", account="Checking",
+                            description="PAYROLL", amount=5000.0,
+                            category="income"),
+                Transaction(date=f"{month}-10", account="Checking",
+                            description="KROGER", amount=-600.0,
+                            category="groceries"),
+                Transaction(date=f"{month}-15", account="Checking",
+                            description="OPPD", amount=-200.0,
+                            category="utilities"),
+            ])
+        debts = [Debt(name="Visa", kind="credit_card", balance=2000,
+                      apr=0.2499, min_payment=50, credit_limit=5000)]
+        return FinanceState(accounts=[acct], transactions=txs, debts=debts)
+
+    def test_dashboard_shows_cash_plan(self):
+        code, body = self.get("/")
+        self.assertEqual(code, 200)
+        self.assertIn("Monthly Cash Plan", body)
+        self.assertIn("avalanche", body.lower())
+        # Highest-APR debt (Visa) should be named in the plan.
+        self.assertIn("Visa", body)
+
+    def test_dashboard_shows_goal_picker(self):
+        code, body = self.get("/")
+        self.assertEqual(code, 200)
+        self.assertIn("Primary goal", body)
+        self.assertIn('value="pay_off_debt"', body)
+
+    def test_goal_post_persists_new_choice(self):
+        code, _ = self.post("/settings/goal", {
+            "primary_goal": "build_savings",
+            "household_size": "2",
+        })
+        self.assertEqual(code, 200)
+        s = self.state()
+        self.assertEqual(s.primary_goal, "build_savings")
+        self.assertEqual(s.household_size, 2)
+
+
+class CashflowAlarmTests(WebTestBase):
+    """Persistent red banner appears on every page when the rolling
+    3-month spending average exceeds income."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = [
+            Transaction(date="2026-01-03", account="Checking",
+                        description="PAYROLL", amount=2000.0,
+                        category="income"),
+            Transaction(date="2026-01-10", account="Checking",
+                        description="RENT", amount=-2500.0,
+                        category="home"),
+        ]
+        return FinanceState(accounts=[acct], transactions=txs)
+
+    def test_alarm_appears_on_dashboard(self):
+        code, body = self.get("/")
+        self.assertEqual(code, 200)
+        self.assertIn("Spending exceeds income", body)
+
+    def test_alarm_appears_on_budget(self):
+        _, body = self.get("/budget")
+        self.assertIn("Spending exceeds income", body)
+
+    def test_alarm_absent_when_in_the_black(self):
+        s = self.state()
+        s.transactions = [
+            Transaction(date="2026-01-03", account="Checking",
+                        description="PAYROLL", amount=3000.0,
+                        category="income"),
+            Transaction(date="2026-01-10", account="Checking",
+                        description="RENT", amount=-1500.0,
+                        category="home"),
+        ]
+        storage.save(s, self.store)
+        _, body = self.get("/")
+        self.assertNotIn("Spending exceeds income", body)
+
+
 class TrendsChartTests(WebTestBase):
     """With multi-month data the /trends page renders an SVG line
     chart and at least one MoM delta card."""

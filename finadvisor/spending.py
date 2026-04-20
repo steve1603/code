@@ -16,7 +16,7 @@ from datetime import date
 from statistics import mean
 from typing import Iterable
 
-from finadvisor.models import SPENDING_CATEGORIES, Transaction
+from finadvisor.models import Debt, SPENDING_CATEGORIES, Transaction
 
 
 # Categories that represent money flowing within the user's own
@@ -800,4 +800,262 @@ def budget_advice(
         months_used=n_months,
         headline=headline,
         suggestions=suggestions,
+    )
+
+
+# --- Monthly Cash Plan -------------------------------------------------------
+
+# Starter emergency fund for anyone carrying high-APR debt. Classic
+# Dave Ramsey-style $1k cushion — enough to absorb a small shock
+# without reaching for a card.
+STARTER_EMERGENCY = 1000.0
+
+
+@dataclass
+class DebtPaymentPlan:
+    """How much to route to one debt this month."""
+
+    name: str
+    kind: str
+    apr: float
+    min_payment: float
+    extra: float              # amount on top of minimum
+    total: float              # min_payment + extra
+
+
+@dataclass
+class MonthlyCashPlan:
+    """Prescriptive one-month cash allocation.
+
+    The Dashboard renders this as a single card that tells the user
+    exactly how much to spend on essentials, save, and pay toward each
+    debt — derived from their actual income, expenses, and APR ranks.
+    No user input beyond imported statements (and debt balances).
+    """
+
+    income: float                       # monthly take-home
+    essentials_cap: float               # recommended ceiling on non-debt spending
+    current_essentials: float           # 3-mo avg actual spending
+    savings_target: float               # recommended transfer this month
+    debt_minimums: float                # sum of all min_payments
+    extra_to_debt: float                # surplus routed to highest-APR debt
+    debt_plan: list[DebtPaymentPlan] = field(default_factory=list)
+    shortfall: float = 0.0              # > 0 when income < essentials + minimums
+    goal: str = "pay_off_debt"
+    headline: str = ""
+    notes: list[str] = field(default_factory=list)
+
+
+def _emergency_target(
+    monthly_expenses: float,
+    household_size: int,
+    primary_goal: str,
+) -> float:
+    """How big the emergency fund should be for this household.
+
+    Dual-income 2-person households can reasonably aim for 6 months of
+    expenses; single-earners should aim higher since job loss wipes
+    100% of income. Users with a "build_savings" goal get a stretch
+    target; everyone else targets the starter $1k first.
+    """
+    if monthly_expenses <= 0:
+        return STARTER_EMERGENCY
+    months = 6 if household_size >= 2 else 3
+    if primary_goal == "build_savings":
+        months = max(months, 6)
+    return monthly_expenses * months
+
+
+def monthly_cash_plan(
+    transactions: Iterable[Transaction],
+    debts: list[Debt],
+    monthly_income: float = 0.0,
+    current_savings: float = 0.0,
+    household_size: int = 1,
+    primary_goal: str = "pay_off_debt",
+    months: int = 3,
+) -> MonthlyCashPlan:
+    """Build a single-month prescriptive cash allocation.
+
+    Rules:
+      1. Use the larger of `monthly_income` or the 3-mo derived income.
+      2. Essentials cap = min(actual avg, income - minimums - starter).
+      3. If `current_savings < STARTER_EMERGENCY`, fill that first.
+      4. Otherwise:
+         - `pay_off_debt`: all surplus → highest-APR debt.
+         - `build_savings`: all surplus → emergency fund until target.
+         - `balanced`: 50/50 split.
+      5. If income < essentials + minimums, flag a shortfall.
+    """
+    txs = list(transactions)
+    income_avg, expenses_avg, _debt_avg, n_months = derived_budget(
+        txs, months=months,
+    )
+    income = monthly_income if monthly_income > 0 else income_avg
+    debt_minimums = sum(d.min_payment for d in debts)
+
+    current_essentials = expenses_avg  # 3-mo average non-debt spending
+
+    notes: list[str] = []
+    shortfall = 0.0
+
+    # Essentials cap: leave at least the minimums and a starter savings
+    # transfer untouched. If income is too low, cap = whatever's left
+    # after minimums (could be less than actual spending — the shortfall
+    # note will fire).
+    room_for_essentials = income - debt_minimums
+    if room_for_essentials <= 0:
+        # Can't even cover minimums; essentials cap is a best-effort
+        # 60% of income. Shortfall flagged below.
+        essentials_cap = income * 0.60 if income > 0 else current_essentials
+    else:
+        # If the user is already spending less than the room allows,
+        # don't inflate their cap — hold the line at what they actually
+        # spend. Otherwise recommend trimming to the room available.
+        essentials_cap = min(current_essentials, room_for_essentials * 0.90)
+        if current_essentials > room_for_essentials:
+            notes.append(
+                f"Current essentials (${current_essentials:,.0f}/mo) exceed "
+                f"what your income leaves after debt minimums "
+                f"(${room_for_essentials:,.0f}/mo). The cap below is the "
+                f"target — trim wants first."
+            )
+
+    # Detect shortfall.
+    if income > 0 and income < current_essentials + debt_minimums:
+        shortfall = (current_essentials + debt_minimums) - income
+        notes.append(
+            f"Spending is ${shortfall:,.0f}/mo above income. Every "
+            f"dollar cut from wants goes straight to stopping the bleed."
+        )
+
+    # Surplus available after essentials (at the capped level) and minimums.
+    if income > 0:
+        surplus = max(0.0, income - essentials_cap - debt_minimums)
+    else:
+        surplus = 0.0
+
+    # Starter-savings rule: if current_savings < $1k, divert surplus there
+    # first (unless there's literally nothing extra).
+    savings_target = 0.0
+    if current_savings < STARTER_EMERGENCY and surplus > 0:
+        needed = STARTER_EMERGENCY - current_savings
+        savings_target = min(needed, surplus)
+        surplus -= savings_target
+        if savings_target > 0:
+            notes.append(
+                f"Save ${savings_target:,.0f} this month to finish a "
+                f"${STARTER_EMERGENCY:,.0f} starter emergency fund — "
+                f"that single cushion stops the card-debt cycle when a "
+                f"car repair or medical bill hits."
+            )
+
+    # After starter is in place, goal drives where surplus goes.
+    em_target = _emergency_target(
+        current_essentials, household_size, primary_goal,
+    )
+    if surplus > 0 and current_savings >= STARTER_EMERGENCY:
+        if primary_goal == "build_savings":
+            savings_add = min(surplus, max(0.0, em_target - current_savings))
+            savings_target += savings_add
+            surplus -= savings_add
+        elif primary_goal == "balanced":
+            split = surplus / 2
+            savings_target += split
+            surplus -= split
+
+    extra_to_debt = surplus
+
+    # Distribute `extra_to_debt` across debts. For pay_off_debt this is
+    # pure avalanche — all extra to the single highest-APR debt. For
+    # other goals the extra still goes to highest-APR, just smaller.
+    ranked = sorted(debts, key=lambda d: d.apr, reverse=True)
+    debt_plan: list[DebtPaymentPlan] = []
+    remaining_extra = extra_to_debt
+    for i, d in enumerate(ranked):
+        extra = remaining_extra if i == 0 else 0.0
+        debt_plan.append(DebtPaymentPlan(
+            name=d.name,
+            kind=d.kind,
+            apr=d.apr,
+            min_payment=d.min_payment,
+            extra=round(extra, 2),
+            total=round(d.min_payment + extra, 2),
+        ))
+        remaining_extra = 0.0  # only the top-APR debt gets the bonus
+
+    # Compose the headline based on what the plan looks like.
+    if income <= 0:
+        headline = (
+            "Import a bank statement — the advisor will then tell you "
+            "exactly how much to spend, save, and pay to debt this month."
+        )
+    elif shortfall > 0:
+        headline = (
+            f"Spending ${shortfall:,.0f} more than you earn. Cut that "
+            f"from wants first — debt plans only work in the black."
+        )
+    elif extra_to_debt > 0 and debt_plan:
+        top = debt_plan[0]
+        headline = (
+            f"This month: cap essentials at ${essentials_cap:,.0f}, "
+            f"save ${savings_target:,.0f}, pay ${top.total:,.0f} to "
+            f"{top.name} (avalanche — highest APR)."
+        )
+    elif savings_target > 0:
+        headline = (
+            f"This month: cap essentials at ${essentials_cap:,.0f}, "
+            f"save ${savings_target:,.0f}. No extra for debt yet — "
+            f"emergency fund comes first."
+        )
+    else:
+        headline = (
+            f"This month: cover minimums (${debt_minimums:,.0f}) and "
+            f"cap essentials at ${essentials_cap:,.0f}. No surplus — "
+            f"trim a want to create one."
+        )
+
+    if n_months == 0:
+        notes.insert(
+            0,
+            "No transaction history yet — import a statement to sharpen "
+            "these numbers.",
+        )
+
+    return MonthlyCashPlan(
+        income=round(income, 2),
+        essentials_cap=round(max(0.0, essentials_cap), 2),
+        current_essentials=round(current_essentials, 2),
+        savings_target=round(savings_target, 2),
+        debt_minimums=round(debt_minimums, 2),
+        extra_to_debt=round(extra_to_debt, 2),
+        debt_plan=debt_plan,
+        shortfall=round(shortfall, 2),
+        goal=primary_goal,
+        headline=headline,
+        notes=notes,
+    )
+
+
+def negative_cashflow_alarm(
+    transactions: Iterable[Transaction],
+    monthly_income: float = 0.0,
+    months: int = 3,
+) -> tuple[bool, float, float]:
+    """Return (is_negative, income_avg, spending_avg) — persistent
+    banner driver. Triggered when the rolling average spending (across
+    every category, including debt) exceeds take-home income.
+    """
+    txs = list(transactions)
+    income_avg, expenses_avg, debt_avg, n_months = derived_budget(
+        txs, months=months,
+    )
+    income = monthly_income if monthly_income > 0 else income_avg
+    total_out = expenses_avg + debt_avg
+    if n_months == 0 or income <= 0:
+        return (False, round(income, 2), round(total_out, 2))
+    return (
+        total_out > income,
+        round(income, 2),
+        round(total_out, 2),
     )

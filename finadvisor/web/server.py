@@ -322,6 +322,20 @@ def make_handler(store_path: Path):
         def _save(self, state) -> None:
             storage.save(state, store_path)
 
+        def _set_alarm_for(self, state) -> None:
+            """Compute the negative-cashflow alarm once for this request
+            and stash it on the templates module so every page renders
+            the banner consistently. Cheap — pure Python over the
+            already-loaded transactions."""
+            try:
+                alarm = spending_module.negative_cashflow_alarm(
+                    state.transactions,
+                    monthly_income=state.budget.monthly_income,
+                )
+                templates.set_alarm(alarm if alarm[0] else None)
+            except Exception:  # noqa: BLE001 — never block a page render
+                templates.set_alarm(None)
+
         # ---- GET routes ------------------------------------------------
         def do_GET(self) -> None:  # noqa: N802 (stdlib API)
             try:
@@ -331,12 +345,30 @@ def make_handler(store_path: Path):
                 flash = _pop_flash()
                 if path == "/" or path == "/dashboard":
                     state = self._state()
+                    self._set_alarm_for(state)
                     report = run_all(state)
+                    cash_plan = spending_module.monthly_cash_plan(
+                        state.transactions,
+                        state.debts,
+                        monthly_income=state.budget.monthly_income,
+                        current_savings=state.current_savings,
+                        household_size=state.household_size,
+                        primary_goal=state.primary_goal,
+                    )
+                    alarm_tuple = spending_module.negative_cashflow_alarm(
+                        state.transactions,
+                        monthly_income=state.budget.monthly_income,
+                    )
                     return self._html(
-                        templates.render_dashboard(state, report, flash=flash)
+                        templates.render_dashboard(
+                            state, report, flash=flash,
+                            cash_plan=cash_plan,
+                            alarm=alarm_tuple if alarm_tuple[0] else None,
+                        )
                     )
                 if path == "/debts":
                     state = self._state()
+                    self._set_alarm_for(state)
                     edit = (query.get("edit", [""])[0] or "").strip() or None
                     return self._html(
                         templates.render_debts(
@@ -345,6 +377,7 @@ def make_handler(store_path: Path):
                     )
                 if path == "/budget":
                     state = self._state()
+                    self._set_alarm_for(state)
                     advice = spending_module.budget_advice(
                         state.transactions,
                         monthly_income_override=state.budget.monthly_income,
@@ -356,6 +389,7 @@ def make_handler(store_path: Path):
                     )
                 if path == "/analysis":
                     state = self._state()
+                    self._set_alarm_for(state)
                     try:
                         extra = float(query.get("extra", ["0"])[0] or 0)
                     except ValueError:
@@ -392,6 +426,7 @@ def make_handler(store_path: Path):
                     )
                 if path == "/spending":
                     state = self._state()
+                    self._set_alarm_for(state)
                     summaries = spending_module.monthly_summaries(
                         state.transactions
                     )
@@ -431,6 +466,7 @@ def make_handler(store_path: Path):
                     )
                 if path == "/trends":
                     state = self._state()
+                    self._set_alarm_for(state)
                     trends = spending_module.category_trends(
                         state.transactions
                     )
@@ -460,6 +496,7 @@ def make_handler(store_path: Path):
                     )
                 if path == "/transactions":
                     state = self._state()
+                    self._set_alarm_for(state)
                     active_month = (query.get("month", [""])[0] or "").strip()
                     active_category = (
                         query.get("category", [""])[0] or ""
@@ -528,6 +565,8 @@ def make_handler(store_path: Path):
                     return self._post_budget(form)
                 if path == "/budget/autofill":
                     return self._post_budget_autofill()
+                if path == "/settings/goal":
+                    return self._post_settings_goal(form)
                 if path == "/import":
                     return self._post_import(form)
                 if path == "/import/statement":
@@ -642,6 +681,39 @@ def make_handler(store_path: Path):
                 f"month(s) of transactions.",
             )
             self._redirect("/budget")
+
+        def _post_settings_goal(self, form: dict[str, list[str]]) -> None:
+            """Persist the primary goal + household size from the
+            Dashboard goal picker. Validated by `FinanceState`."""
+            state = self._state()
+            goal = _str(form, "primary_goal", state.primary_goal)
+            try:
+                hh = int(_float(form, "household_size", state.household_size))
+            except ValueError:
+                hh = state.household_size
+            try:
+                state.primary_goal = goal
+                state.household_size = max(1, hh)
+                # Trigger __post_init__ validation by re-creating.
+                from finadvisor.models import FinanceState as _FS
+                _FS(**{
+                    "debts": state.debts,
+                    "budget": state.budget,
+                    "consolidation_apr": state.consolidation_apr,
+                    "current_savings": state.current_savings,
+                    "accounts": state.accounts,
+                    "transactions": state.transactions,
+                    "category_rules": state.category_rules,
+                    "household_size": state.household_size,
+                    "primary_goal": state.primary_goal,
+                    "guidance_style": state.guidance_style,
+                })
+            except ValueError as e:
+                _set_flash("error", str(e))
+                return self._redirect("/")
+            self._save(state)
+            _set_flash("success", "Goal saved — cash plan updated.")
+            self._redirect("/")
 
         def _post_budget(self, form: dict[str, list[str]]) -> None:
             state = self._state()

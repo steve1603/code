@@ -612,5 +612,171 @@ class BudgetAdviceTests(unittest.TestCase):
         self.assertIn("Import", advice.headline)
 
 
+class MonthlyCashPlanTests(unittest.TestCase):
+    """The Dashboard's one-card autonomous cash allocation."""
+
+    def _txs_with_surplus(self) -> list[Transaction]:
+        # $5000/mo in, $2000/mo essentials over 2 months.
+        txs: list[Transaction] = []
+        for month in ("2026-01", "2026-02"):
+            txs.extend([
+                Transaction(
+                    date=f"{month}-05", account="Checking",
+                    description="PAYROLL", amount=5000.0, category="income",
+                ),
+                Transaction(
+                    date=f"{month}-10", account="Checking",
+                    description="KROGER", amount=-800.0, category="groceries",
+                ),
+                Transaction(
+                    date=f"{month}-15", account="Checking",
+                    description="OPPD", amount=-200.0, category="utilities",
+                ),
+                Transaction(
+                    date=f"{month}-18", account="Checking",
+                    description="MORTGAGE", amount=-1000.0, category="home",
+                ),
+            ])
+        return txs
+
+    def test_surplus_routes_to_highest_apr_debt(self):
+        from finadvisor.spending import monthly_cash_plan
+        from finadvisor.models import Debt
+        debts = [
+            Debt(name="Visa", kind="credit_card", balance=5000,
+                 apr=0.2499, min_payment=100),
+            Debt(name="Auto", kind="auto", balance=20000,
+                 apr=0.05, min_payment=350),
+        ]
+        plan = monthly_cash_plan(
+            self._txs_with_surplus(), debts,
+            current_savings=2000,  # starter already filled
+            household_size=2, primary_goal="pay_off_debt",
+        )
+        # Income = 5000, essentials avg = 2000, minimums = 450.
+        # Surplus = 5000 - capped_essentials - 450 ≈ 2750 (cap uses 90%
+        # of the room, so 0.9 * (5000-450) = 4095 cap, but essentials
+        # only 2000 → cap held at 2000).
+        self.assertEqual(plan.income, 5000.0)
+        self.assertGreater(plan.extra_to_debt, 2000)
+        # Avalanche: highest-APR debt (Visa) gets the extra.
+        self.assertEqual(plan.debt_plan[0].name, "Visa")
+        self.assertGreater(plan.debt_plan[0].extra, 0)
+        self.assertEqual(plan.debt_plan[1].extra, 0)
+
+    def test_starter_savings_funded_before_debt_extra(self):
+        from finadvisor.spending import monthly_cash_plan
+        from finadvisor.models import Debt
+        debts = [Debt(name="Visa", kind="credit_card", balance=5000,
+                      apr=0.2499, min_payment=100)]
+        plan = monthly_cash_plan(
+            self._txs_with_surplus(), debts,
+            current_savings=0.0,  # no cushion yet
+            household_size=2, primary_goal="pay_off_debt",
+        )
+        # Starter $1000 comes off the top.
+        self.assertGreaterEqual(plan.savings_target, 999.0)
+        self.assertGreater(plan.extra_to_debt, 0)
+
+    def test_shortfall_flagged_when_income_too_low(self):
+        from finadvisor.spending import monthly_cash_plan
+        from finadvisor.models import Debt
+        debts = [Debt(name="Visa", kind="credit_card", balance=5000,
+                      apr=0.2499, min_payment=100)]
+        # Force a shortfall: monthly_income = 1500, essentials ~2000.
+        plan = monthly_cash_plan(
+            self._txs_with_surplus(), debts,
+            monthly_income=1500.0,
+            current_savings=0.0,
+            household_size=2, primary_goal="pay_off_debt",
+        )
+        self.assertGreater(plan.shortfall, 0)
+        self.assertEqual(plan.extra_to_debt, 0)
+
+    def test_balanced_goal_splits_surplus(self):
+        from finadvisor.spending import monthly_cash_plan
+        from finadvisor.models import Debt
+        debts = [Debt(name="Visa", kind="credit_card", balance=5000,
+                      apr=0.2499, min_payment=100)]
+        plan = monthly_cash_plan(
+            self._txs_with_surplus(), debts,
+            current_savings=2000,  # past starter
+            household_size=2, primary_goal="balanced",
+        )
+        # With balanced goal, savings_target and extra_to_debt should
+        # each be ~half the post-starter surplus.
+        self.assertGreater(plan.savings_target, 0)
+        self.assertGreater(plan.extra_to_debt, 0)
+
+    def test_no_transactions_returns_import_hint(self):
+        from finadvisor.spending import monthly_cash_plan
+        plan = monthly_cash_plan([], [], household_size=2)
+        self.assertEqual(plan.income, 0.0)
+        self.assertIn("Import", plan.headline)
+
+
+class NegativeCashflowAlarmTests(unittest.TestCase):
+    def test_alarm_triggers_when_spending_exceeds_income(self):
+        from finadvisor.spending import negative_cashflow_alarm
+        txs = [
+            Transaction(
+                date="2026-01-05", account="Checking",
+                description="PAY", amount=2000.0, category="income",
+            ),
+            Transaction(
+                date="2026-01-10", account="Checking",
+                description="RENT", amount=-2500.0, category="home",
+            ),
+        ]
+        is_neg, income, spending = negative_cashflow_alarm(txs)
+        self.assertTrue(is_neg)
+        self.assertEqual(income, 2000.0)
+        self.assertEqual(spending, 2500.0)
+
+    def test_alarm_quiet_when_in_the_black(self):
+        from finadvisor.spending import negative_cashflow_alarm
+        txs = [
+            Transaction(
+                date="2026-01-05", account="Checking",
+                description="PAY", amount=3000.0, category="income",
+            ),
+            Transaction(
+                date="2026-01-10", account="Checking",
+                description="RENT", amount=-1500.0, category="home",
+            ),
+        ]
+        is_neg, _, _ = negative_cashflow_alarm(txs)
+        self.assertFalse(is_neg)
+
+    def test_alarm_silent_with_no_transactions(self):
+        from finadvisor.spending import negative_cashflow_alarm
+        is_neg, _, _ = negative_cashflow_alarm([])
+        self.assertFalse(is_neg)
+
+
+class FinanceStateAutonomyFieldsTests(unittest.TestCase):
+    """Round-trip the new goal/household fields through to_dict/from_dict."""
+
+    def test_defaults_are_persistable(self):
+        from finadvisor.models import FinanceState
+        s = FinanceState()
+        self.assertEqual(s.household_size, 1)
+        self.assertEqual(s.primary_goal, "pay_off_debt")
+        self.assertEqual(s.guidance_style, "both")
+        rehydrated = FinanceState.from_dict(s.to_dict())
+        self.assertEqual(rehydrated.primary_goal, "pay_off_debt")
+        self.assertEqual(rehydrated.household_size, 1)
+
+    def test_rejects_invalid_goal(self):
+        from finadvisor.models import FinanceState
+        with self.assertRaises(ValueError):
+            FinanceState(primary_goal="retire_early")
+
+    def test_rejects_zero_household(self):
+        from finadvisor.models import FinanceState
+        with self.assertRaises(ValueError):
+            FinanceState(household_size=0)
+
+
 if __name__ == "__main__":
     unittest.main()
