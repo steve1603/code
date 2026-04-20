@@ -1,6 +1,8 @@
 """Dashboard: at-a-glance totals + 'Next best action'."""
 from __future__ import annotations
 
+from datetime import date
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
@@ -11,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from finadvisor.report import run_all
+from finadvisor.strategies._simulate import MAX_MONTHS
 
 
 class _Card(QFrame):
@@ -55,10 +58,14 @@ class DashboardPage(QWidget):
         self.card_apr = _Card("Weighted APR")
         self.card_dti = _Card("Debt-to-income")
         self.card_payoff = _Card("Avalanche payoff")
+        self.card_emergency = _Card("Emergency fund")
+        self.card_savings = _Card("Interest saved vs. Snowball")
         grid.addWidget(self.card_total, 0, 0)
         grid.addWidget(self.card_apr, 0, 1)
-        grid.addWidget(self.card_dti, 1, 0)
-        grid.addWidget(self.card_payoff, 1, 1)
+        grid.addWidget(self.card_dti, 0, 2)
+        grid.addWidget(self.card_payoff, 1, 0)
+        grid.addWidget(self.card_emergency, 1, 1)
+        grid.addWidget(self.card_savings, 1, 2)
         root.addLayout(grid)
 
         tip = QLabel(
@@ -83,6 +90,8 @@ class DashboardPage(QWidget):
             self.card_apr.set_value("—")
             self.card_dti.set_value("—")
             self.card_payoff.set_value("—")
+            self.card_emergency.set_value(f"${state.current_savings:,.0f}")
+            self.card_savings.set_value("—")
             return
 
         report = run_all(state)
@@ -98,17 +107,52 @@ class DashboardPage(QWidget):
         else:
             self.card_dti.set_value("set budget")
 
-        # Pull payoff months from the avalanche result.
         avalanche_r = next(
             (r for r in report.results if r.title.startswith("Avalanche")),
             None,
         )
         if avalanche_r and avalanche_r.metrics.get("months_to_payoff"):
             months = int(avalanche_r.metrics["months_to_payoff"])
-            y, m = divmod(months, 12)
-            text = (
-                f"{y}y {m}m" if y and m else f"{y}y" if y else f"{m}m"
-            )
-            self.card_payoff.set_value(text)
+            if months >= MAX_MONTHS:
+                self.card_payoff.set_value("never at current rate")
+            else:
+                y, m = divmod(months, 12)
+                duration = (
+                    f"{y}y {m}m" if y and m else f"{y}y" if y else f"{m}m"
+                )
+                today = date.today()
+                # Approximate calendar math: add months exactly.
+                year = today.year + (today.month - 1 + months) // 12
+                month = (today.month - 1 + months) % 12 + 1
+                free_by = date(year, month, 1).strftime("%b %Y")
+                self.card_payoff.set_value(f"{duration}  (by {free_by})")
         else:
             self.card_payoff.set_value("—")
+
+        emergency_r = next(
+            (r for r in report.results if r.title == "Emergency fund"), None,
+        )
+        if emergency_r:
+            months_covered = emergency_r.metrics.get("months_covered", 0.0)
+            label = f"${state.current_savings:,.0f}"
+            if months_covered > 0:
+                label += f"  ({months_covered:.1f} mo)"
+            self.card_emergency.set_value(label)
+        else:
+            self.card_emergency.set_value(f"${state.current_savings:,.0f}")
+
+        snowball_r = next(
+            (r for r in report.results if r.title.startswith("Snowball")), None,
+        )
+        if (
+            avalanche_r and snowball_r
+            and "total_interest" in avalanche_r.metrics
+            and "total_interest" in snowball_r.metrics
+        ):
+            delta = (
+                snowball_r.metrics["total_interest"]
+                - avalanche_r.metrics["total_interest"]
+            )
+            self.card_savings.set_value(f"${max(delta, 0):,.0f}")
+        else:
+            self.card_savings.set_value("—")

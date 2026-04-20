@@ -4,11 +4,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from finadvisor.models import FinanceState
-from finadvisor.strategies import avalanche, budget, consolidation, snowball, utilization
+from finadvisor.strategies import (
+    avalanche,
+    budget,
+    consolidation,
+    emergency_fund,
+    long_term,
+    snowball,
+    utilization,
+)
 from finadvisor.strategies.base import Severity, StrategyResult
 
 
-STRATEGY_MODULES = [avalanche, snowball, consolidation, budget, utilization]
+STRATEGY_MODULES = [
+    avalanche,
+    snowball,
+    consolidation,
+    budget,
+    utilization,
+    emergency_fund,
+    long_term,
+]
 
 _SEVERITY_RANK = {
     Severity.URGENT: 3,
@@ -34,8 +50,8 @@ def run_all(state: FinanceState) -> Report:
 
 
 def _pick_next_action(results: list[StrategyResult]) -> str:
-    """Prioritize: utilization > budget > avalanche > consolidation > snowball."""
-    priority = ["Credit utilization", "Budget / cashflow"]
+    """Prioritize: utilization > budget > emergency fund > avalanche > consolidation > snowball."""
+    priority = ["Credit utilization", "Budget / cashflow", "Emergency fund"]
     # Take the highest-severity result from the priority list; fall back to
     # highest-severity overall.
     by_title = {r.title: r for r in results}

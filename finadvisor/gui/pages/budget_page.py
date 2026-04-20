@@ -38,10 +38,12 @@ class BudgetPage(QWidget):
         form = QFormLayout()
         self.income = MoneyLineEdit()
         self.expenses = MoneyLineEdit()
+        self.savings = MoneyLineEdit()
         self.consolidation = PercentLineEdit()
         self.consolidation.setMaximum(40.0)
         form.addRow("Monthly income (take-home)", self.income)
         form.addRow("Monthly expenses (excl. debt)", self.expenses)
+        form.addRow("Current emergency savings", self.savings)
         form.addRow("Assumed consolidation APR", self.consolidation)
         root.addLayout(form)
 
@@ -67,6 +69,7 @@ class BudgetPage(QWidget):
         b = self.window_.state.budget
         self.income.setValue(b.monthly_income)
         self.expenses.setValue(b.monthly_expenses)
+        self.savings.setValue(self.window_.state.current_savings)
         self.consolidation.setDecimalValue(self.window_.state.consolidation_apr)
         self._update_surplus()
 
@@ -90,5 +93,6 @@ class BudgetPage(QWidget):
             monthly_income=self.income.value(),
             monthly_expenses=self.expenses.value(),
         )
+        self.window_.state.current_savings = self.savings.value()
         self.window_.state.consolidation_apr = self.consolidation.decimalValue()
         self.window_.mark_dirty()
