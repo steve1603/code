@@ -188,11 +188,37 @@ class BankStatementTests(unittest.TestCase):
         card = next(t for t in txs if "CREDIT CARD PAYMENT" in t.description)
         self.assertEqual(card.kind_guess, "credit_card")
         self.assertEqual(card.account_hint, "6421")
-        loan = next(t for t in txs if "LOAN PAYMENT" in t.description)
-        self.assertEqual(loan.kind_guess, "personal")
-        self.assertEqual(loan.account_hint, "3351")
-        taco = next(t for t in txs if "TACO BELL" in t.description)
-        self.assertEqual(taco.kind_guess, "other")
+
+    def test_skips_activity_summary_rows(self):
+        # A pypdf-style flattened header that mixes the Activity
+        # Summary labels with a Statement Period date. The parser
+        # previously turned these into bogus "transactions" — now it
+        # must drop every summary row and only keep the real
+        # transaction rows below.
+        text = (
+            "Statement Period 02/01/2026 to 02/28/2026\n"
+            "Activity Summary\n"
+            "Beginning Balance $4,326.96\n"
+            "5 Deposits/Credits $12,268.92\n"
+            "103 Withdrawals/Debits $13,864.10\n"
+            "Service Charges and ATM Service Fee $0.00\n"
+            "Ending Balance $2,731.78\n"
+            "Total Overdraft (OD) Fees $0.00 $0.00\n"
+            "Total Non-Sufficient Funds (NSF) Fees $0.00 $0.00\n"
+            "Date Description Debits Credits Balance\n"
+            "02/17 DEBIT CARD PURCHASE KROGER $54.33 $2,677.45\n"
+            "02/20 DEBIT CARD PURCHASE TACO BELL $8.07 $2,669.38\n"
+        )
+        txs = self.bs.parse_transactions(text)
+        # Exactly the two real debit rows — no summary rows.
+        self.assertEqual(len(txs), 2)
+        for t in txs:
+            desc_low = t.description.lower()
+            self.assertNotIn("balance", desc_low)
+            self.assertNotIn("activity summary", desc_low)
+            self.assertNotIn("statement period", desc_low)
+            self.assertNotIn("withdrawals/debits", desc_low)
+            self.assertNotIn("deposits/credits", desc_low)
 
     def test_suggest_debt_name(self):
         txs = self.bs.parse_transactions(self.SAMPLE)

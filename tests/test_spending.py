@@ -533,5 +533,84 @@ class CategoryRuleModelTests(unittest.TestCase):
             CategoryRule(match="x", category="vibes")
 
 
+class BudgetAdviceTests(unittest.TestCase):
+    """Derives income/expense averages and concrete cut suggestions
+    from the transaction ledger — the engine powering the zero-input
+    /budget experience."""
+
+    def _make_txs(self) -> list[Transaction]:
+        # Two months with a clear "wants-heavy" pattern: $3000 income,
+        # $400 groceries (need), $600 dining out (want over threshold),
+        # $200 subscriptions (want over threshold).
+        txs: list[Transaction] = []
+        for month in ("2026-01", "2026-02"):
+            txs.extend([
+                Transaction(
+                    date=f"{month}-05", account="Checking",
+                    description="PAYROLL", amount=3000.0, category="income",
+                ),
+                Transaction(
+                    date=f"{month}-10", account="Checking",
+                    description="KROGER", amount=-400.0, category="groceries",
+                ),
+                Transaction(
+                    date=f"{month}-15", account="Checking",
+                    description="DINING OUT", amount=-600.0, category="dining",
+                ),
+                Transaction(
+                    date=f"{month}-20", account="Checking",
+                    description="NETFLIX", amount=-200.0,
+                    category="subscriptions",
+                ),
+                Transaction(
+                    date=f"{month}-22", account="Checking",
+                    description="CC PAYMENT", amount=-150.0,
+                    category="debt_payment",
+                ),
+            ])
+        return txs
+
+    def test_derived_budget_averages_last_3_months(self):
+        from finadvisor.spending import derived_budget
+        income, expenses, debt, n = derived_budget(self._make_txs())
+        self.assertEqual(n, 2)
+        self.assertAlmostEqual(income, 3000.0)
+        self.assertAlmostEqual(expenses, 1200.0)  # 400+600+200
+        self.assertAlmostEqual(debt, 150.0)
+
+    def test_budget_advice_suggests_cuts_for_wants_over_30pct(self):
+        from finadvisor.spending import budget_advice
+        advice = budget_advice(self._make_txs())
+        # Wants total = 600 + 200 = 800 / 3000 ≈ 27%. Still under the
+        # 30% cap — but both wants are >$50 so we suggest trims anyway.
+        cut_cats = {s.category for s in advice.suggestions if s.is_cut}
+        self.assertIn("dining", cut_cats)
+        self.assertIn("subscriptions", cut_cats)
+        # Each cut suggestion carries a target cap.
+        for s in advice.suggestions:
+            if s.is_cut:
+                self.assertIsNotNone(s.target_monthly)
+                self.assertLess(s.target_monthly, s.avg_monthly)
+
+    def test_budget_advice_protects_needs(self):
+        from finadvisor.spending import budget_advice
+        advice = budget_advice(self._make_txs())
+        # Groceries is a "need" — must appear as a NON-cut suggestion.
+        groceries = next(
+            (s for s in advice.suggestions if s.category == "groceries"),
+            None,
+        )
+        self.assertIsNotNone(groceries)
+        self.assertFalse(groceries.is_cut)
+        self.assertEqual(groceries.severity, "good")
+
+    def test_budget_advice_empty_transactions(self):
+        from finadvisor.spending import budget_advice
+        advice = budget_advice([])
+        self.assertEqual(advice.months_used, 0)
+        self.assertEqual(advice.suggestions, [])
+        self.assertIn("Import", advice.headline)
+
+
 if __name__ == "__main__":
     unittest.main()

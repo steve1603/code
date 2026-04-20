@@ -529,3 +529,275 @@ def detect_recurring(
         ))
     recurring.sort(key=lambda r: r.yearly_cost, reverse=True)
     return recurring
+
+
+# --- Budget advice -----------------------------------------------------------
+
+# Classify each spending category for the 50/30/20 rule. "Needs" are
+# unavoidable living costs, "wants" are discretionary, and "debt" is
+# minimums + extra on loans/cards. "other" is treated as a need by
+# default since the user hasn't disambiguated it yet.
+_NEEDS_CATEGORIES = frozenset({
+    "groceries", "utilities", "phone_internet", "insurance",
+    "healthcare", "home", "auto", "gas",
+})
+_WANTS_CATEGORIES = frozenset({
+    "dining", "entertainment", "subscriptions", "shopping",
+    "travel", "cash",
+})
+_DEBT_CATEGORIES = frozenset({"debt_payment"})
+
+
+# Human-friendly labels for category suggestions.
+_CATEGORY_LABELS = {
+    "groceries": "Groceries",
+    "utilities": "Utilities",
+    "phone_internet": "Phone & internet",
+    "insurance": "Insurance",
+    "healthcare": "Healthcare",
+    "home": "Home / rent / mortgage",
+    "auto": "Auto",
+    "gas": "Gas",
+    "dining": "Dining out",
+    "entertainment": "Entertainment",
+    "subscriptions": "Subscriptions",
+    "shopping": "Shopping",
+    "travel": "Travel",
+    "cash": "Cash withdrawals",
+    "fees": "Fees",
+    "other": "Other",
+    "debt_payment": "Debt payments",
+}
+
+
+@dataclass
+class BudgetSuggestion:
+    """One concrete piece of budget advice tied to a category."""
+
+    category: str
+    label: str
+    avg_monthly: float
+    severity: str   # "good" / "warn" / "urgent" / "info"
+    note: str
+    is_cut: bool = False       # True when we recommend trimming
+    target_monthly: float | None = None  # suggested cap, if any
+
+
+@dataclass
+class BudgetAdvice:
+    """Derived income/expense estimates plus a prioritized list of
+    suggestions. Populated from the transaction ledger so the user
+    rarely has to type numbers themselves."""
+
+    derived_income: float            # avg monthly income (last 3 mo)
+    derived_expenses: float          # avg monthly non-debt spending
+    derived_debt_payments: float     # avg monthly debt-payment outflow
+    needs_total: float
+    wants_total: float
+    months_used: int                 # how many months informed the averages
+    headline: str                    # one-liner above the list
+    suggestions: list[BudgetSuggestion] = field(default_factory=list)
+
+
+def _recent_months(
+    transactions: Iterable[Transaction], n: int = 3,
+) -> list[str]:
+    months = months_of(transactions)
+    return months[-n:] if months else []
+
+
+def derived_budget(
+    transactions: Iterable[Transaction], months: int = 3,
+) -> tuple[float, float, float, int]:
+    """Return (income, expenses_excl_debt, debt_payments, months_used)
+    averaged over the last `months` calendar months of transactions.
+
+    This is what `/budget` uses to auto-populate the form so the user
+    doesn't have to guess their own take-home pay or expense total.
+    """
+    txs = list(transactions)
+    recent = _recent_months(txs, months)
+    if not recent:
+        return (0.0, 0.0, 0.0, 0)
+    window = set(recent)
+    income = 0.0
+    expenses = 0.0
+    debt_pay = 0.0
+    for tx in txs:
+        if tx.month not in window:
+            continue
+        if tx.amount > 0:
+            # Only count income-category deposits; transfers-in are
+            # not new cash.
+            if tx.category == "income":
+                income += tx.amount
+            continue
+        amt = -tx.amount
+        if tx.category in NON_SPENDING_CATEGORIES:
+            continue
+        if tx.category in _DEBT_CATEGORIES:
+            debt_pay += amt
+        else:
+            expenses += amt
+    n = len(recent)
+    return (income / n, expenses / n, debt_pay / n, n)
+
+
+def _avg_by_category(
+    transactions: Iterable[Transaction], months: list[str],
+) -> dict[str, float]:
+    """Per-category average monthly spend over the given months."""
+    if not months:
+        return {}
+    totals: dict[str, float] = {}
+    window = set(months)
+    for tx in transactions:
+        if tx.amount >= 0 or tx.category in NON_SPENDING_CATEGORIES:
+            continue
+        if tx.month not in window:
+            continue
+        totals[tx.category] = totals.get(tx.category, 0.0) + (-tx.amount)
+    return {c: v / len(months) for c, v in totals.items()}
+
+
+def budget_advice(
+    transactions: Iterable[Transaction],
+    monthly_income_override: float = 0.0,
+    months: int = 3,
+) -> BudgetAdvice:
+    """Generate budget recommendations based on the last `months` of
+    actual spending.
+
+    The advice focuses on wants (easy wins to cut) rather than needs
+    (structural, require lifestyle change). If the user has told us
+    their income explicitly we use that; otherwise we estimate from
+    income-category deposits.
+    """
+    txs = list(transactions)
+    income_avg, expenses_avg, debt_avg, n_months = derived_budget(
+        txs, months=months
+    )
+    income = monthly_income_override if monthly_income_override > 0 else income_avg
+    recent = _recent_months(txs, months)
+    by_cat = _avg_by_category(txs, recent)
+
+    needs_total = sum(
+        v for c, v in by_cat.items() if c in _NEEDS_CATEGORIES
+    )
+    wants_total = sum(
+        v for c, v in by_cat.items() if c in _WANTS_CATEGORIES
+    )
+
+    suggestions: list[BudgetSuggestion] = []
+
+    # High-level 50/30/20 check: wants ≤ 30% of income.
+    wants_pct = (wants_total / income) if income > 0 else 0.0
+    if income <= 0:
+        headline = (
+            f"Import a statement to unlock personalized advice. "
+            f"Based on {n_months} month(s) of data so far, you're "
+            f"spending about ${expenses_avg:,.0f}/mo outside of debt."
+        ) if n_months else (
+            "Import a bank statement — the advisor will auto-fill "
+            "income and expenses and start recommending specific cuts."
+        )
+    elif wants_pct > 0.30:
+        over_by = wants_total - income * 0.30
+        headline = (
+            f"Your discretionary spending is {wants_pct*100:.0f}% of "
+            f"income (${wants_total:,.0f}/mo) — about ${over_by:,.0f} "
+            f"above the recommended 30% cap. Top cuts below could free "
+            f"that up for debt or savings."
+        )
+    elif (expenses_avg + debt_avg) > income:
+        headline = (
+            f"You're spending more than you bring in "
+            f"(${expenses_avg + debt_avg:,.0f}/mo vs "
+            f"${income:,.0f} income). Cutting from the list below "
+            f"is the fastest way to stop the bleed."
+        )
+    else:
+        surplus = income - expenses_avg - debt_avg
+        headline = (
+            f"Healthy: ${surplus:,.0f}/mo surplus after expenses "
+            f"and debt. Consider routing that toward emergency fund "
+            f"or high-APR debt — see suggestions below."
+        )
+
+    # Rank wants by size and recommend trimming the biggest items.
+    want_items = sorted(
+        ((c, v) for c, v in by_cat.items() if c in _WANTS_CATEGORIES),
+        key=lambda x: x[1], reverse=True,
+    )
+    # Cut up to three want-categories that individually exceed $50/mo.
+    cuts_made = 0
+    for cat, avg in want_items:
+        if avg < 50 or cuts_made >= 3:
+            break
+        target = max(0.0, avg * 0.80)  # suggest a 20% cut
+        freed = avg - target
+        suggestions.append(BudgetSuggestion(
+            category=cat,
+            label=_CATEGORY_LABELS.get(cat, cat.title()),
+            avg_monthly=avg,
+            severity="warn",
+            note=(
+                f"You're averaging ${avg:,.0f}/mo here. Capping at "
+                f"${target:,.0f} (a 20% trim) would free "
+                f"${freed:,.0f}/mo without touching essentials."
+            ),
+            is_cut=True,
+            target_monthly=target,
+        ))
+        cuts_made += 1
+
+    # Protect needs — call out 1-2 of the biggest needs as "don't cut."
+    need_items = sorted(
+        ((c, v) for c, v in by_cat.items() if c in _NEEDS_CATEGORIES),
+        key=lambda x: x[1], reverse=True,
+    )
+    for cat, avg in need_items[:2]:
+        if avg < 100:
+            break
+        suggestions.append(BudgetSuggestion(
+            category=cat,
+            label=_CATEGORY_LABELS.get(cat, cat.title()),
+            avg_monthly=avg,
+            severity="good",
+            note=(
+                f"${avg:,.0f}/mo — this is an essential category. "
+                f"Only cut if a structural change (cheaper provider, "
+                f"downsizing) is on the table; don't starve it to "
+                f"hit a short-term goal."
+            ),
+            is_cut=False,
+        ))
+
+    # If debt payments are > 20% of income, call it out explicitly.
+    if income > 0 and debt_avg > 0:
+        debt_pct = debt_avg / income
+        if debt_pct > 0.20:
+            suggestions.append(BudgetSuggestion(
+                category="debt_payment",
+                label="Debt payments",
+                avg_monthly=debt_avg,
+                severity="urgent",
+                note=(
+                    f"Debt payments are {debt_pct*100:.0f}% of income "
+                    f"(${debt_avg:,.0f}/mo). Over 20% is a yellow flag — "
+                    f"free up wants above and route the savings into "
+                    f"your highest-APR balance first (avalanche)."
+                ),
+                is_cut=False,
+            ))
+
+    return BudgetAdvice(
+        derived_income=round(income_avg, 2),
+        derived_expenses=round(expenses_avg, 2),
+        derived_debt_payments=round(debt_avg, 2),
+        needs_total=round(needs_total, 2),
+        wants_total=round(wants_total, 2),
+        months_used=n_months,
+        headline=headline,
+        suggestions=suggestions,
+    )

@@ -394,20 +394,107 @@ def render_debts(
     return render_page("debts", "Debts", content, flash=flash)
 
 
-def render_budget(state: FinanceState, flash: str = "") -> str:
+def render_budget(
+    state: FinanceState,
+    advice: "object | None" = None,
+    flash: str = "",
+) -> str:
     b = state.budget
+
+    # Auto-populate hints come from the transaction-derived averages.
+    income_hint = ""
+    expenses_hint = ""
+    auto_panel = ""
+    if advice is not None and advice.months_used > 0:
+        d_income = advice.derived_income
+        d_expenses = advice.derived_expenses
+        d_debt = advice.derived_debt_payments
+        if d_income > 0 and abs(d_income - b.monthly_income) > 10:
+            income_hint = (
+                f'<small class="muted">Last {advice.months_used} mo '
+                f'actual: <strong>${d_income:,.2f}/mo</strong></small>'
+            )
+        if d_expenses > 0 and abs(d_expenses - b.monthly_expenses) > 10:
+            expenses_hint = (
+                f'<small class="muted">Last {advice.months_used} mo '
+                f'actual: <strong>${d_expenses:,.2f}/mo</strong></small>'
+            )
+        # One-click "apply derived numbers" form.
+        if d_income > 0 or d_expenses > 0:
+            auto_panel = f"""
+<form method="post" action="/budget/autofill"
+      style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;
+             padding:14px 16px;margin:12px 0;display:flex;
+             flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
+  <div>
+    <strong style="color:#1e3a8a">Auto-fill from transactions</strong>
+    <div class="muted" style="font-size:13px;margin-top:2px">
+      Using the last {advice.months_used} month(s): income
+      <strong>${d_income:,.2f}</strong>, expenses (excl. debt)
+      <strong>${d_expenses:,.2f}</strong>, debt payments
+      <strong>${d_debt:,.2f}</strong>.
+    </div>
+  </div>
+  <button type="submit" class="btn">Use these values</button>
+</form>
+"""
+
+    # Recommendations panel.
+    rec_panel = ""
+    if advice is not None:
+        headline = _esc(advice.headline) if advice.headline else ""
+        items: list[str] = []
+        for s in advice.suggestions:
+            sev_cls = f"severity-{s.severity}"
+            icon = "✂️" if s.is_cut else ("⚠️" if s.severity == "urgent" else "🛡")
+            target = (
+                f' <span class="muted">→ target '
+                f'<strong>${s.target_monthly:,.0f}/mo</strong></span>'
+                if s.target_monthly is not None else ""
+            )
+            items.append(
+                f'<li style="margin-bottom:10px">'
+                f'<span class="banner {sev_cls}" '
+                f'style="display:inline-block;margin:0;padding:2px 8px;'
+                f'font-size:12px;border-radius:999px">'
+                f'{icon} {_esc(s.label)}{target}</span>'
+                f'<div class="muted" style="font-size:13px;margin-top:4px">'
+                f'{_esc(s.note)}</div>'
+                f'</li>'
+            )
+        body = (
+            f'<ul style="list-style:none;padding-left:0">{"".join(items)}</ul>'
+            if items else
+            '<p class="muted">Import a couple months of statements and '
+            'the advisor will tell you exactly which categories to trim.</p>'
+        )
+        rec_panel = f"""
+<section style="background:white;border:1px solid #e5e7eb;
+                border-radius:10px;padding:16px;margin:16px 0">
+  <h3 style="margin-top:0">Budget coach</h3>
+  <p style="color:#374151">{headline}</p>
+  {body}
+</section>
+"""
+
     content = f"""
 <h2>Budget</h2>
 <p class="muted">All figures are monthly. The advisor computes how much
-is left over after expenses and minimum debt payments.</p>
+is left over after expenses and minimum debt payments. Import a bank
+statement to auto-fill these from your actual cashflow.</p>
+{auto_panel}
 <form method="post" action="/budget">
   <div class="row">
     <div><label>Monthly income (take-home)</label>
       <input name="income" type="number" step="0.01" min="0"
-             value="{b.monthly_income}"></div>
+             value="{b.monthly_income}">
+      {income_hint}
+    </div>
     <div><label>Monthly expenses (excl. debt)</label>
       <input name="expenses" type="number" step="0.01" min="0"
-             value="{b.monthly_expenses}"></div>
+             value="{b.monthly_expenses}">
+      {expenses_hint}
+    </div>
   </div>
   <div class="row">
     <div><label>Current emergency savings ($)</label>
@@ -419,6 +506,7 @@ is left over after expenses and minimum debt payments.</p>
   </div>
   <p style="margin-top:12px"><button type="submit">Save</button></p>
 </form>
+{rec_panel}
 """
     return render_page("budget", "Budget", content, flash=flash)
 
@@ -433,21 +521,66 @@ def render_analysis(
     flash: str = "",
     extra: float = 0.0,
     whatif: dict | None = None,
+    suggested_extra: float = 0.0,
+    candidate_debts: list | None = None,
 ) -> str:
+    # If the caller derived a surplus from the budget but the user
+    # hasn't typed a number into the what-if field yet, pre-fill it —
+    # that's the "auto-populate" ask.
+    displayed_extra = extra if extra > 0 else round(suggested_extra, 0)
+    hint = ""
+    if suggested_extra > 0 and extra <= 0:
+        hint = (
+            f'<small class="muted" style="display:block;margin-top:4px">'
+            f'Auto-filled from your budget surplus '
+            f'(${suggested_extra:,.0f}/mo available after expenses + '
+            f'minimums).</small>'
+        )
     whatif_form = f"""
 <form method="get" action="/analysis" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
   <div style="flex:1 1 200px">
     <label>What-if: extra $/month</label>
-    <input name="extra" type="number" step="10" min="0" value="{extra:.0f}">
+    <input name="extra" type="number" step="10" min="0" value="{displayed_extra:.0f}">
+    {hint}
   </div>
   <div><button type="submit">Recalculate</button></div>
 </form>
 """
+
+    # Candidate-debts panel: if there are no debts on file but we've
+    # detected recurring debt-like payments (credit-card, loan) in the
+    # transaction ledger, surface them so the user isn't stuck on
+    # "No debts on file".
+    candidate_panel = ""
+    if candidate_debts:
+        rows = "".join(
+            f'<tr><td><strong>{_esc(c["name"])}</strong></td>'
+            f'<td>{_esc(c["kind"].replace("_", " ").title())}</td>'
+            f'<td style="text-align:right">${c["monthly"]:,.2f}/mo</td>'
+            f'<td>{_esc(c["months_seen_str"])}</td></tr>'
+            for c in candidate_debts
+        )
+        candidate_panel = f"""
+<section style="background:white;border:1px solid #e5e7eb;
+                border-radius:10px;padding:16px;margin:16px 0">
+  <h3 style="margin-top:0">Likely debts from your statements</h3>
+  <p class="muted">The advisor spotted these recurring payments in
+  your transactions. Add them as debts (with balance + APR) to unlock
+  the payoff strategies below.</p>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th>Name</th><th>Kind</th><th>Monthly</th>
+    <th>Seen in</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table></div>
+  <p style="margin-top:10px"><a class="btn" href="/debts">Add a debt</a></p>
+</section>
+"""
+
     if not report.results:
         return render_page(
             "analysis", "Analysis",
-            f"<h2>Analysis</h2>{whatif_form}"
-            "<p>Add a debt first.</p>",
+            f"<h2>Analysis</h2>{whatif_form}{candidate_panel}"
+            "<p>Add a debt first — then we can show payoff strategies.</p>",
             flash=flash,
         )
 
@@ -502,6 +635,7 @@ def render_analysis(
     content = f"""
 <h2>Analysis</h2>
 {whatif_form}
+{candidate_panel}
 {whatif_banner}
 <div class="banner"><strong>Next best action</strong>
 {_esc(report.next_best_action)}</div>

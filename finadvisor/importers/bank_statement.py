@@ -184,6 +184,44 @@ def _clean_description(raw: str) -> str:
     return text.strip(" ,;")
 
 
+# Phrases that appear in a statement's "Activity Summary" / fees box
+# but never on a real transaction row. pypdf often flattens these next
+# to the "Statement Period MM/DD/YYYY" header, which the date-anchored
+# parser would otherwise turn into bogus transactions.
+_NON_TRANSACTION_PHRASES = (
+    "activity summary",
+    "beginning balance",
+    "ending balance",
+    "available balance",
+    "previous balance",
+    "new balance",
+    "deposits/credits",
+    "withdrawals/debits",
+    "service charges",
+    "atm service fee",
+    "total overdraft",
+    "non-sufficient funds",
+    "nsf fee",
+    "total for this period",
+    "total year-to-date",
+    "year-to-date",
+    "fee reversals",
+    "statement period",
+    "page ",
+    "of ",
+)
+
+
+def _is_non_transaction(description: str) -> bool:
+    """True if the line's description belongs to a statement's header
+    / summary box rather than a real transaction row. We match on a
+    lowercased substring because pypdf frequently concatenates the
+    label with a trailing dollar figure (e.g. 'Beginning Balance
+    $4,326.96')."""
+    lower = description.lower()
+    return any(phrase in lower for phrase in _NON_TRANSACTION_PHRASES)
+
+
 def parse_transactions(text: str) -> list[Transaction]:
     """Extract every dated transaction from the ledger text.
 
@@ -217,6 +255,10 @@ def parse_transactions(text: str) -> list[Transaction]:
         desc = _clean_description(desc)
         if not desc:
             # Probably an opening/closing-balance row with only amounts.
+            continue
+        if _is_non_transaction(desc):
+            # Drop rows that belong to the statement's Activity Summary
+            # block (Beginning/Ending Balance, fee totals, etc.).
             continue
 
         debit = credit = balance = None

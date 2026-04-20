@@ -98,6 +98,44 @@ def _str(form: dict[str, list[str]], key: str, default: str = "") -> str:
     return (form.get(key, [default])[0] or default).strip()
 
 
+def _candidate_debts_from_transactions(state) -> list[dict]:
+    """Surface recurring debt-like transactions as candidate debts
+    when the user has no debts on file yet. Skipped entirely once
+    state.debts is non-empty so we don't spam the Analysis page for
+    users who have already set up their debts.
+    """
+    if state.debts:
+        return []
+    recurring = spending_module.detect_recurring(
+        state.transactions, min_months=1,
+    )
+    out: list[dict] = []
+    for r in recurring:
+        if r.category != "debt_payment":
+            continue
+        months_str = ", ".join(r.months_seen) if r.months_seen else ""
+        # Very rough: treat any debt_payment recurring charge as a
+        # credit_card unless the description hints at something else.
+        desc_l = r.description.lower()
+        if "mortgage" in desc_l:
+            kind = "mortgage"
+        elif "auto" in desc_l or "car" in desc_l:
+            kind = "auto"
+        elif "student" in desc_l or "navient" in desc_l or "nelnet" in desc_l:
+            kind = "student_loan"
+        elif "loan" in desc_l:
+            kind = "personal"
+        else:
+            kind = "credit_card"
+        out.append({
+            "name": r.description,
+            "kind": kind,
+            "monthly": r.monthly_cost,
+            "months_seen_str": months_str,
+        })
+    return out[:8]  # limit so the panel doesn't overwhelm on busy ledgers
+
+
 def _rule_match_from_description(description: str) -> str:
     """Derive a durable `CategoryRule.match` substring from a raw
     transaction description. We strip store numbers / location suffixes
@@ -307,8 +345,14 @@ def make_handler(store_path: Path):
                     )
                 if path == "/budget":
                     state = self._state()
+                    advice = spending_module.budget_advice(
+                        state.transactions,
+                        monthly_income_override=state.budget.monthly_income,
+                    )
                     return self._html(
-                        templates.render_budget(state, flash=flash)
+                        templates.render_budget(
+                            state, advice=advice, flash=flash
+                        )
                     )
                 if path == "/analysis":
                     state = self._state()
@@ -317,6 +361,13 @@ def make_handler(store_path: Path):
                     except ValueError:
                         extra = 0.0
                     extra = max(0.0, extra)
+                    # Auto-populate: if the user hasn't typed an extra
+                    # amount, suggest their current surplus.
+                    suggested_extra = max(
+                        0.0,
+                        state.budget.extra_payment_capacity(state.debts),
+                    )
+                    candidate_debts = _candidate_debts_from_transactions(state)
                     baseline = run_all(state)
                     whatif = None
                     if extra > 0:
@@ -335,6 +386,8 @@ def make_handler(store_path: Path):
                     return self._html(
                         templates.render_analysis(
                             report, flash=flash, extra=extra, whatif=whatif,
+                            suggested_extra=suggested_extra,
+                            candidate_debts=candidate_debts,
                         )
                     )
                 if path == "/spending":
@@ -473,6 +526,8 @@ def make_handler(store_path: Path):
                     return self._post_delete_debt(form)
                 if path == "/budget":
                     return self._post_budget(form)
+                if path == "/budget/autofill":
+                    return self._post_budget_autofill()
                 if path == "/import":
                     return self._post_import(form)
                 if path == "/import/statement":
@@ -558,6 +613,35 @@ def make_handler(store_path: Path):
                 self._save(state)
                 _set_flash("success", f"Removed {name}.")
             self._redirect("/debts")
+
+        def _post_budget_autofill(self) -> None:
+            """Replace the saved budget with the 3-month transaction
+            average — zero-input path so the user doesn't have to type
+            income/expense numbers manually."""
+            state = self._state()
+            advice = spending_module.budget_advice(state.transactions)
+            if advice.months_used == 0:
+                _set_flash(
+                    "error",
+                    "Import a bank statement first — "
+                    "no transactions to derive numbers from yet.",
+                )
+                return self._redirect("/budget")
+            try:
+                state.budget = Budget(
+                    monthly_income=round(advice.derived_income, 2),
+                    monthly_expenses=round(advice.derived_expenses, 2),
+                )
+            except ValueError as e:
+                _set_flash("error", str(e))
+                return self._redirect("/budget")
+            self._save(state)
+            _set_flash(
+                "success",
+                f"Auto-filled budget from {advice.months_used} "
+                f"month(s) of transactions.",
+            )
+            self._redirect("/budget")
 
         def _post_budget(self, form: dict[str, list[str]]) -> None:
             state = self._state()

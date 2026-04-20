@@ -560,6 +560,89 @@ class TransactionsSaveTests(WebTestBase):
         self.assertEqual(debt.balance, 5)
 
 
+class BudgetAutofillTests(WebTestBase):
+    """/budget/autofill replaces income/expenses with the transaction-
+    derived 3-month averages so the user can populate the budget with
+    a single click."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = [
+            Transaction(date="2026-01-03", account="Checking",
+                        description="PAYROLL", amount=4000.0,
+                        category="income"),
+            Transaction(date="2026-01-10", account="Checking",
+                        description="KROGER", amount=-500.0,
+                        category="groceries"),
+            Transaction(date="2026-02-03", account="Checking",
+                        description="PAYROLL", amount=4000.0,
+                        category="income"),
+            Transaction(date="2026-02-10", account="Checking",
+                        description="KROGER", amount=-500.0,
+                        category="groceries"),
+        ]
+        return FinanceState(accounts=[acct], transactions=txs,
+                             budget=Budget(0, 0))
+
+    def test_autofill_sets_income_and_expenses(self):
+        code, _ = self.post("/budget/autofill", {})
+        self.assertEqual(code, 200)
+        s = self.state()
+        self.assertAlmostEqual(s.budget.monthly_income, 4000.0)
+        self.assertAlmostEqual(s.budget.monthly_expenses, 500.0)
+
+    def test_autofill_with_no_transactions_flashes_error(self):
+        s = self.state()
+        s.transactions.clear()
+        storage.save(s, self.store)
+        _, body = self.post("/budget/autofill", {})
+        self.assertIn("Import a bank statement first", body)
+
+    def test_budget_page_shows_coach_recommendations(self):
+        code, body = self.get("/budget")
+        self.assertEqual(code, 200)
+        self.assertIn("Budget coach", body)
+
+
+class AnalysisAutoPopulateTests(WebTestBase):
+    """When there are no debts but recurring debt-payment
+    transactions exist, /analysis surfaces them as candidate debts.
+    When debts + budget exist, the what-if field is pre-filled with
+    the surplus."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = [
+            Transaction(date="2026-01-15", account="Checking",
+                        description="USAA CREDIT CARD PAYMENT",
+                        amount=-250.0, category="debt_payment"),
+            Transaction(date="2026-02-15", account="Checking",
+                        description="USAA CREDIT CARD PAYMENT",
+                        amount=-250.0, category="debt_payment"),
+        ]
+        return FinanceState(accounts=[acct], transactions=txs)
+
+    def test_analysis_surfaces_candidate_debts_when_empty(self):
+        code, body = self.get("/analysis")
+        self.assertEqual(code, 200)
+        self.assertIn("Likely debts from your statements", body)
+        self.assertIn("Usaa Credit Card Payment", body)
+
+    def test_analysis_prefills_extra_from_surplus(self):
+        s = self.state()
+        s.debts.append(Debt(
+            name="Visa", kind="credit_card", balance=1000, apr=0.2,
+            min_payment=25, credit_limit=5000,
+        ))
+        s.budget = Budget(monthly_income=5000, monthly_expenses=3000)
+        storage.save(s, self.store)
+        code, body = self.get("/analysis")
+        self.assertEqual(code, 200)
+        # Surplus = 5000 - 3000 - 25 = 1975 → pre-filled in input.
+        self.assertIn('value="1975"', body)
+        self.assertIn("Auto-filled from your budget surplus", body)
+
+
 class TrendsChartTests(WebTestBase):
     """With multi-month data the /trends page renders an SVG line
     chart and at least one MoM delta card."""
