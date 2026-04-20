@@ -397,5 +397,141 @@ class ProjectionTests(unittest.TestCase):
         )
 
 
+class TotalSpendingByMonthTests(unittest.TestCase):
+    def test_sums_outflows_excluding_transfers(self):
+        txs = [
+            _tx("2026-01-05", -300, "dining"),
+            _tx("2026-01-10", -200, "groceries"),
+            _tx("2026-01-15", -100, "transfer"),   # excluded
+            _tx("2026-01-20", 2500, "income"),     # excluded (positive)
+            _tx("2026-02-05", -400, "dining"),
+        ]
+        totals = spending.total_spending_by_month(txs)
+        self.assertAlmostEqual(totals["2026-01"], 500)
+        self.assertAlmostEqual(totals["2026-02"], 400)
+
+
+class MonthlyDeltasTests(unittest.TestCase):
+    def test_computes_dollar_and_pct_deltas(self):
+        totals = {"2026-01": 1000.0, "2026-02": 1200.0, "2026-03": 900.0}
+        deltas = spending.monthly_deltas(totals)
+        self.assertEqual(len(deltas), 2)
+        (a1, b1, d1, p1) = deltas[0]
+        self.assertEqual((a1, b1), ("2026-01", "2026-02"))
+        self.assertAlmostEqual(d1, 200)
+        self.assertAlmostEqual(p1, 0.20, places=4)
+        (a2, b2, d2, p2) = deltas[1]
+        self.assertEqual((a2, b2), ("2026-02", "2026-03"))
+        self.assertAlmostEqual(d2, -300)
+        self.assertAlmostEqual(p2, -0.25, places=4)
+
+    def test_empty_totals(self):
+        self.assertEqual(spending.monthly_deltas({}), [])
+
+
+class CategoryTrendPctByMonthTests(unittest.TestCase):
+    def test_first_month_is_none_and_subsequent_have_pct(self):
+        txs = [
+            _tx("2026-01-05", -100, "dining"),
+            _tx("2026-02-05", -150, "dining"),  # +50%
+            _tx("2026-03-05", -120, "dining"),  # -20%
+        ]
+        trends = spending.category_trends(txs)
+        dining = next(t for t in trends if t.category == "dining")
+        self.assertIsNone(dining.pct_by_month["2026-01"])
+        self.assertAlmostEqual(dining.pct_by_month["2026-02"], 0.5)
+        self.assertAlmostEqual(dining.pct_by_month["2026-03"], -0.2)
+
+
+class TopMerchantsTests(unittest.TestCase):
+    def test_ranks_merchants_and_merges_noise(self):
+        txs = [
+            _tx("2026-03-05", -25.0, "dining", desc="TACO BELL #037203 SUGAR LAND TX"),
+            _tx("2026-03-10", -18.0, "dining", desc="TACO BELL #5622 OMAHA NE"),
+            _tx("2026-03-15", -120.0, "groceries", desc="KROGER #147 OMAHA NE"),
+            _tx("2026-03-20", -3000, "transfer", desc="FUNDS TRANSFER"),
+            _tx("2026-03-25", 2500, "income", desc="DIRECT DEPOSIT"),
+        ]
+        top = spending.top_merchants(txs, "2026-03", n=5)
+        labels = [name for name, _ in top]
+        # Kroger spends $120, Taco Bell combines to $43
+        self.assertEqual(top[0][0].upper().startswith("KROGER"), True)
+        self.assertAlmostEqual(top[0][1], 120.0)
+        self.assertTrue(any("TACO" in l.upper() for l in labels))
+        # Transfer + income are skipped
+        self.assertFalse(any("TRANSFER" in l.upper() for l in labels))
+        self.assertFalse(any("DIRECT DEPOSIT" in l.upper() for l in labels))
+
+
+class DetectRecurringTests(unittest.TestCase):
+    def test_detects_multi_month_consistent_charge(self):
+        txs = [
+            _tx("2026-01-05", -15.99, "subscriptions", desc="NETFLIX.COM CA"),
+            _tx("2026-02-05", -15.99, "subscriptions", desc="NETFLIX.COM CA"),
+            _tx("2026-03-05", -15.99, "subscriptions", desc="NETFLIX.COM CA"),
+        ]
+        result = spending.detect_recurring(txs)
+        self.assertTrue(result, "Netflix should be flagged as recurring.")
+        r = result[0]
+        self.assertIn("NETFLIX", r.description.upper())
+        self.assertAlmostEqual(r.typical_amount, 15.99)
+        self.assertEqual(len(r.months_seen), 3)
+        self.assertAlmostEqual(r.yearly_cost, round(15.99 * 12, 2))
+
+    def test_skips_single_month_items(self):
+        txs = [
+            _tx("2026-01-05", -15.99, "subscriptions", desc="NETFLIX.COM CA"),
+        ]
+        self.assertEqual(spending.detect_recurring(txs), [])
+
+    def test_skips_highly_variable_amounts(self):
+        # Groceries vary by month → not a subscription.
+        txs = [
+            _tx("2026-01-05", -120, "groceries", desc="KROGER GROCERIES"),
+            _tx("2026-02-05", -420, "groceries", desc="KROGER GROCERIES"),
+            _tx("2026-03-05", -180, "groceries", desc="KROGER GROCERIES"),
+        ]
+        self.assertEqual(spending.detect_recurring(txs), [])
+
+
+class CategorizeWithRulesTests(unittest.TestCase):
+    def test_user_rule_overrides_builtin(self):
+        from finadvisor.models import CategoryRule
+        rules = [CategoryRule(match="netflix", category="entertainment")]
+        # Default rule says subscriptions; user override wins.
+        self.assertEqual(
+            bs.categorize("NETFLIX.COM CA", rules=rules), "entertainment",
+        )
+
+    def test_rule_that_does_not_match_is_ignored(self):
+        from finadvisor.models import CategoryRule
+        rules = [CategoryRule(match="nomatch", category="entertainment")]
+        self.assertEqual(
+            bs.categorize("NETFLIX.COM CA", rules=rules), "subscriptions",
+        )
+
+
+class CategoryRuleModelTests(unittest.TestCase):
+    def test_roundtrip_through_finance_state(self):
+        from finadvisor.models import CategoryRule
+        st = FinanceState(
+            category_rules=[CategoryRule(match="netflix", category="entertainment")]
+        )
+        restored = FinanceState.from_dict(st.to_dict())
+        self.assertEqual(len(restored.category_rules), 1)
+        self.assertEqual(restored.category_rules[0].match, "netflix")
+        self.assertEqual(restored.category_rules[0].category, "entertainment")
+
+    def test_rejects_blank_match(self):
+        from finadvisor.models import CategoryRule
+        with self.assertRaises(ValueError):
+            CategoryRule(match="", category="other")
+
+    def test_rejects_unknown_category(self):
+        from finadvisor.models import CategoryRule
+        with self.assertRaises(ValueError):
+            CategoryRule(match="x", category="vibes")
+
+
 if __name__ == "__main__":
     unittest.main()

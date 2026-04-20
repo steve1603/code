@@ -819,6 +819,8 @@ def render_spending(
     insights,
     per_account,
     breakdown=None,
+    merchants=None,
+    recurring=None,
     flash: str = "",
 ) -> str:
     """Monthly cashflow view: headline cards + insight list + the most
@@ -988,11 +990,65 @@ def render_spending(
         f"<tbody>{''.join(history_rows)}</tbody></table>"
     )
 
+    # ---- Top merchants (this month) -----------------------------
+    merchants_html = ""
+    if merchants:
+        rows_html = "".join(
+            f'<tr><td>{_esc(name.title())}</td>'
+            f'<td style="text-align:right">{_money(amount)}</td></tr>'
+            for name, amount in merchants
+        )
+        merchants_html = (
+            f'<h3 style="margin-top:24px">Top merchants — '
+            f'{_esc(latest.month)}</h3>'
+            f'<table style="max-width:560px"><thead><tr>'
+            f'<th>Merchant</th><th style="text-align:right">Spent</th>'
+            f'</tr></thead><tbody>{rows_html}</tbody></table>'
+            f'<p class="muted" style="margin-top:6px">'
+            f'Biggest single-merchant outflows this month. Store '
+            f'numbers and locations are merged into one row.</p>'
+        )
+
+    # ---- Recurring charges --------------------------------------
+    recurring_html = ""
+    if recurring:
+        yearly_total = sum(r.yearly_cost for r in recurring)
+        monthly_total = sum(r.monthly_cost for r in recurring)
+        rows_html = "".join(
+            f'<tr><td>{_esc(r.description)}</td>'
+            f'<td class="muted" style="font-size:12px">{_esc(r.account)}</td>'
+            f'<td>{_esc(r.category.replace("_", " ").title())}</td>'
+            f'<td style="text-align:right">{_money(r.typical_amount)}</td>'
+            f'<td style="text-align:right">{_money(r.monthly_cost)}</td>'
+            f'<td style="text-align:right"><strong>{_money(r.yearly_cost)}</strong></td>'
+            f'</tr>'
+            for r in recurring
+        )
+        recurring_html = (
+            f'<h3 style="margin-top:24px">Recurring charges</h3>'
+            f'<div class="banner severity-info">'
+            f'<strong>{len(recurring)} recurring merchant(s) detected</strong>'
+            f'Together they cost about <strong>{_money(monthly_total)}'
+            f'/mo</strong> — roughly <strong>{_money(yearly_total)}'
+            f'/yr</strong> at the current cadence. Cancel whatever you '
+            f"haven't used this month for an easy win.</div>"
+            f'<div style="overflow-x:auto"><table>'
+            f'<thead><tr><th>Merchant</th><th>Account</th>'
+            f'<th>Category</th>'
+            f'<th style="text-align:right">Typical $</th>'
+            f'<th style="text-align:right">$/mo</th>'
+            f'<th style="text-align:right">$/yr</th>'
+            f'</tr></thead>'
+            f'<tbody>{rows_html}</tbody></table></div>'
+        )
+
     content = f"""
 <h2>Spending</h2>
 <div class="cards">{cards_html}</div>
 {insights_html}
 {cat_html}
+{merchants_html}
+{recurring_html}
 {breakdown_html}
 {acct_html}
 {history_html}
@@ -1004,6 +1060,20 @@ def render_spending(
     return render_page("spending", "Spending", content, flash=flash)
 
 
+def _pct_span(pct: float | None) -> str:
+    """Render a '(+18%)' badge tinted green (down = good) or amber
+    (up = spent more). Returns "" for None (no prior month or zero
+    base), so first-month cells stay quiet."""
+    if pct is None:
+        return ""
+    color = "#059669" if pct < 0 else ("#b45309" if pct > 0 else "#6b7280")
+    sign = "+" if pct > 0 else ""
+    return (
+        f'<div style="font-size:11px;color:{color};font-weight:600">'
+        f"{sign}{pct * 100:.0f}%</div>"
+    )
+
+
 def render_trends(
     state: FinanceState,
     trends,
@@ -1011,6 +1081,8 @@ def render_trends(
     projected: float,
     income_by_month=None,
     summaries=None,
+    totals_by_month=None,
+    deltas=None,
     flash: str = "",
 ) -> str:
     """Category-by-category movement across every month on file."""
@@ -1026,6 +1098,77 @@ def render_trends(
 
     shown_months = months[-6:]
     header_cells = "".join(f"<th>{_esc(m)}</th>" for m in shown_months)
+
+    # ------ Chart + MoM delta cards --------------------------------
+    from finadvisor.web import charts as _charts
+
+    chart_html = ""
+    totals_by_month = totals_by_month or {}
+    deltas = deltas or []
+    if totals_by_month:
+        # Build the chart series: Total on top + top 3 categories by
+        # latest-month spend so the biggest drivers of the Total line
+        # are visible alongside it.
+        series: dict[str, list[tuple[str, float]]] = {
+            "Total": [(m, totals_by_month.get(m, 0.0)) for m in shown_months]
+        }
+        for t in [
+            t for t in trends
+            if t.latest > 0 and t.category not in ("income", "transfer")
+        ][:3]:
+            label = t.category.replace("_", " ").title()
+            series[label] = [
+                (m, t.by_month.get(m, 0.0)) for m in shown_months
+            ]
+
+        chart_svg = _charts.render_line_chart(
+            series, width=680, height=240,
+            title="Monthly spending trajectory",
+        )
+
+        # Side-panel MoM delta cards.
+        delta_cards = []
+        for prev, nxt, dollar_delta, pct_delta in deltas:
+            arrow = "▲" if dollar_delta > 0 else (
+                "▼" if dollar_delta < 0 else "•"
+            )
+            # Spending more = warning; spending less = good.
+            color = "#b45309" if dollar_delta > 0 else (
+                "#059669" if dollar_delta < 0 else "#6b7280"
+            )
+            bg = "#fffbeb" if dollar_delta > 0 else (
+                "#ecfdf5" if dollar_delta < 0 else "#f3f4f6"
+            )
+            pct_str = (
+                f"{('+' if pct_delta > 0 else '')}{pct_delta * 100:.0f}%"
+                if pct_delta is not None else "—"
+            )
+            delta_cards.append(
+                f'<div style="background:{bg};border:1px solid #e5e7eb;'
+                f'border-radius:10px;padding:10px 12px">'
+                f'<div style="font-size:11px;color:#6b7280;font-weight:700;'
+                f'letter-spacing:0.5px;text-transform:uppercase">'
+                f"{_esc(prev)} → {_esc(nxt)}</div>"
+                f'<div style="font-size:18px;font-weight:700;color:{color}">'
+                f"{arrow} {_fmt_delta(dollar_delta)}</div>"
+                f'<div style="font-size:12px;color:#374151">'
+                f"{_esc(pct_str)} vs prev</div></div>"
+            )
+        deltas_html = (
+            '<div style="display:flex;flex-direction:column;gap:8px">'
+            + "".join(delta_cards)
+            + "</div>"
+        ) if delta_cards else ""
+
+        chart_html = (
+            '<div style="background:white;border:1px solid #e5e7eb;'
+            'border-radius:10px;padding:16px;margin:12px 0">'
+            '<div style="display:flex;gap:18px;flex-wrap:wrap;'
+            'align-items:flex-start">'
+            f'<div style="flex:1 1 420px;min-width:280px">{chart_svg}</div>'
+            f'<div style="flex:0 1 220px">{deltas_html}</div>'
+            '</div></div>'
+        )
 
     # Top rows: income and net cashflow, so the reader sees the
     # earning side of the ledger before diving into categories.
@@ -1085,9 +1228,19 @@ def render_trends(
     for t in trends:
         if t.latest == 0 and t.rolling_3mo == 0 and t.previous == 0:
             continue
-        month_cells = "".join(
-            f"<td>{_money(t.by_month.get(m, 0.0))}</td>" for m in shown_months
-        )
+        # Each category cell is $amount on line 1 plus the inline
+        # "+18%" / "-4%" MoM delta on line 2 (hidden for the leftmost
+        # column since there's no predecessor).
+        month_cells_parts = []
+        for m in shown_months:
+            amt = t.by_month.get(m, 0.0)
+            pct = (t.pct_by_month or {}).get(m)
+            month_cells_parts.append(
+                f"<td>{_money(amt)}{_pct_span(pct)}</td>"
+            )
+        month_cells = "".join(month_cells_parts)
+        spark_values = [t.by_month.get(m, 0.0) for m in shown_months]
+        spark = _charts.render_sparkline(spark_values, width=110, height=26)
         delta = t.delta_vs_prev
         if delta > 0:
             delta_cls = "severity-warn"
@@ -1105,7 +1258,8 @@ def render_trends(
             f'{delta_arrow} {_fmt_delta(delta)}</span>'
         )
         rows.append(
-            f'<tr><td><strong>{_esc(t.category.replace("_", " ").title())}</strong></td>'
+            f'<tr><td><strong>{_esc(t.category.replace("_", " ").title())}</strong>'
+            f'<div style="margin-top:2px">{spark}</div></td>'
             f"{month_cells}"
             f"<td>{_money(t.rolling_3mo)}</td>"
             f"<td>{delta_badge}</td>"
@@ -1122,6 +1276,7 @@ def render_trends(
     content = f"""
 <h2>Trends</h2>
 {projection_banner}
+{chart_html}
 <div style="overflow-x:auto">
 <table>
 <thead><tr>
@@ -1132,7 +1287,9 @@ def render_trends(
 </div>
 <p class="muted" style="margin-top:12px">
 Green ▼ means you spent less than last month; amber ▲ means you spent
-more. The 3-month average smooths out one-off bills.
+more. The small inline percentage under each cell is that month's
+change vs the month before it. The 3-month average smooths out
+one-off bills.
 </p>
 """
     return render_page("trends", "Trends", content, flash=flash)
@@ -1228,6 +1385,10 @@ def render_transactions_page(
             f'<td style="text-align:right;{amount_cls}">'
             f"{_money(tx.amount)}</td>"
             f"<td>{_category_select(f'category_{idx}', tx.category)}</td>"
+            f'<td style="text-align:center">'
+            f'<label style="font-size:11px;color:#6b7280;font-weight:500">'
+            f'<input type="checkbox" name="save_rule_{idx}" value="1" '
+            f'style="width:auto;margin-right:4px"> save rule</label></td>'
             f'<input type="hidden" name="row_{idx}" value="1">'
             "</tr>"
         )
@@ -1249,10 +1410,16 @@ def render_transactions_page(
     <thead><tr>
       <th>Date</th><th>Account</th><th>Description</th>
       <th style="text-align:right">Amount</th><th>Category</th>
+      <th style="text-align:center">Rule</th>
     </tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
   </div>
+  <p class="muted" style="margin-top:10px">
+    Tick <strong>save rule</strong> on a row to remember the override
+    — future imports of transactions with a matching description will
+    be auto-categorized the same way.
+  </p>
   <p style="margin-top:12px">
     <button type="submit">Save category changes</button>
     <a class="btn secondary" href="/spending">Back to spending</a>

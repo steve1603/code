@@ -23,7 +23,14 @@ from pathlib import Path
 
 from finadvisor import storage
 from finadvisor.importers import pdf_importer
-from finadvisor.models import Budget, Debt, FinanceState
+from finadvisor.models import (
+    Account,
+    Budget,
+    CategoryRule,
+    Debt,
+    FinanceState,
+    Transaction,
+)
 from finadvisor.web.server import build_server
 
 
@@ -551,6 +558,146 @@ class TransactionsSaveTests(WebTestBase):
         # Original debt unchanged.
         debt = next(d for d in self.state().debts if d.name == "X")
         self.assertEqual(debt.balance, 5)
+
+
+class TrendsChartTests(WebTestBase):
+    """With multi-month data the /trends page renders an SVG line
+    chart and at least one MoM delta card."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = [
+            # January
+            Transaction(date="2026-01-03", account="Checking",
+                        description="PAYROLL", amount=3000.0,
+                        category="income"),
+            Transaction(date="2026-01-10", account="Checking",
+                        description="KROGER", amount=-120.0,
+                        category="groceries"),
+            Transaction(date="2026-01-22", account="Checking",
+                        description="NETFLIX", amount=-15.99,
+                        category="subscriptions"),
+            # February — spending grew
+            Transaction(date="2026-02-03", account="Checking",
+                        description="PAYROLL", amount=3000.0,
+                        category="income"),
+            Transaction(date="2026-02-10", account="Checking",
+                        description="KROGER", amount=-220.0,
+                        category="groceries"),
+            Transaction(date="2026-02-22", account="Checking",
+                        description="NETFLIX", amount=-15.99,
+                        category="subscriptions"),
+        ]
+        return FinanceState(accounts=[acct], transactions=txs)
+
+    def test_trends_contains_svg_chart_and_delta_card(self):
+        code, body = self.get("/trends")
+        self.assertEqual(code, 200)
+        self.assertIn("<svg", body)
+        self.assertIn("<polyline", body)
+        # MoM transition January -> February should render a delta card.
+        self.assertIn("2026-02", body)
+        # Delta card always renders a dollar sign with a sign prefix.
+        self.assertTrue("+$" in body or "-$" in body)
+
+    def test_trends_category_cells_show_inline_pct(self):
+        _, body = self.get("/trends")
+        # groceries went $120 -> $220 = +83%. The inline pct is
+        # rendered under the cell amount as "+83%".
+        self.assertIn("+83%", body)
+
+
+class SpendingFeaturesTests(WebTestBase):
+    """/spending renders recurring + top-merchants sections when
+    there's enough data."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = [
+            Transaction(date="2026-01-03", account="Checking",
+                        description="PAYROLL", amount=3000.0,
+                        category="income"),
+            Transaction(date="2026-01-10", account="Checking",
+                        description="KROGER #123", amount=-100.0,
+                        category="groceries"),
+            Transaction(date="2026-01-22", account="Checking",
+                        description="NETFLIX.COM", amount=-15.99,
+                        category="subscriptions"),
+            Transaction(date="2026-02-03", account="Checking",
+                        description="PAYROLL", amount=3000.0,
+                        category="income"),
+            Transaction(date="2026-02-10", account="Checking",
+                        description="KROGER #456", amount=-130.0,
+                        category="groceries"),
+            Transaction(date="2026-02-22", account="Checking",
+                        description="NETFLIX.COM", amount=-15.99,
+                        category="subscriptions"),
+        ]
+        return FinanceState(accounts=[acct], transactions=txs)
+
+    def test_spending_shows_recurring_and_top_merchants(self):
+        code, body = self.get("/spending")
+        self.assertEqual(code, 200)
+        # Top merchants section header.
+        self.assertIn("Top merchants", body)
+        # Recurring charges section header.
+        self.assertIn("Recurring", body)
+        # Netflix appears in both (same amount two months → recurring).
+        self.assertIn("Netflix", body)
+
+
+class SaveRulePostTests(WebTestBase):
+    """Submitting the transactions form with `save_rule_<idx>=on`
+    persists a CategoryRule to state."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = [
+            Transaction(date="2026-02-22", account="Checking",
+                        description="NETFLIX.COM SUBSCRIPTION",
+                        amount=-15.99, category="subscriptions"),
+        ]
+        return FinanceState(accounts=[acct], transactions=txs)
+
+    def test_save_rule_persists_category_rule(self):
+        # Before: no rules.
+        self.assertEqual(self.state().category_rules, [])
+        code, _ = self.post(
+            "/transactions/save",
+            {"category_0": "entertainment", "save_rule_0": "1"},
+        )
+        self.assertEqual(code, 200)
+        s = self.state()
+        self.assertEqual(len(s.category_rules), 1)
+        rule = s.category_rules[0]
+        self.assertEqual(rule.category, "entertainment")
+        # Match should be derived from a normalized prefix of the
+        # description, which for "NETFLIX.COM SUBSCRIPTION" is
+        # "netflix com subscription" (first 3 tokens).
+        self.assertIn("netflix", rule.match)
+
+    def test_save_rule_skipped_when_checkbox_absent(self):
+        code, _ = self.post(
+            "/transactions/save",
+            {"category_0": "entertainment"},
+        )
+        self.assertEqual(code, 200)
+        self.assertEqual(self.state().category_rules, [])
+
+    def test_existing_rule_not_duplicated(self):
+        # Pre-seed a matching rule.
+        s = self.state()
+        s.category_rules.append(
+            CategoryRule(match="netflix com subscription",
+                         category="entertainment"),
+        )
+        storage.save(s, self.store)
+        code, _ = self.post(
+            "/transactions/save",
+            {"category_0": "entertainment", "save_rule_0": "1"},
+        )
+        self.assertEqual(code, 200)
+        self.assertEqual(len(self.state().category_rules), 1)
 
 
 if __name__ == "__main__":

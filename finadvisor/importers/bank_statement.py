@@ -532,18 +532,38 @@ _CATEGORY_RULES: list[tuple[str, re.Pattern]] = [
 ]
 
 
-def categorize(description: str) -> str:
-    """Return one of SPENDING_CATEGORIES for a transaction description."""
+def categorize(description: str, rules=None) -> str:
+    """Return one of SPENDING_CATEGORIES for a transaction description.
+
+    `rules` is an optional list of user-defined `CategoryRule`s
+    (see `finadvisor.models.CategoryRule`). User rules are applied
+    AFTER the built-in regex rules so an explicit override always
+    beats a default classification.
+    """
     if not description:
         return "other"
+    default_cat = "other"
     for cat, pattern in _CATEGORY_RULES:
         if pattern.search(description):
-            return cat
-    return "other"
+            default_cat = cat
+            break
+    if rules:
+        for rule in rules:
+            # Duck-type: accept either CategoryRule-shaped dataclasses
+            # or dicts. Rules that don't match are silently skipped.
+            try:
+                if rule.matches(description):
+                    return rule.category
+            except AttributeError:
+                match = str(rule.get("match", "")).lower()
+                if match and match in description.lower():
+                    return str(rule.get("category", default_cat))
+    return default_cat
 
 
 def transaction_to_ledger(
     tx: Transaction, md: StatementMetadata, account_name: str,
+    rules=None,
 ) -> "tuple[str, float, str]":
     """Collapse a parsed Transaction into the fields needed for
     models.Transaction — an ISO date, a signed amount, and a category.
@@ -551,6 +571,9 @@ def transaction_to_ledger(
     Sign convention: amount > 0 means money into the account
     (credits/deposits/payments received), amount < 0 means money out
     (debits/purchases). Matches models.Transaction's contract.
+
+    `rules` — optional list of user `CategoryRule`s that override the
+    built-in classifier when their `match` substring is present.
     """
     iso_date = assign_year(md, tx.date)
     if tx.credit is not None:
@@ -559,7 +582,7 @@ def transaction_to_ledger(
         amount = -float(tx.debit)
     else:
         amount = 0.0
-    category = categorize(tx.description)
+    category = categorize(tx.description, rules=rules)
     return iso_date, amount, category
 
 

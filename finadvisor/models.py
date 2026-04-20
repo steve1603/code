@@ -221,6 +221,40 @@ class Transaction:
 
 
 @dataclass
+class CategoryRule:
+    """User-defined override mapping a description substring to a
+    category. Applied at import time (after the built-in regex rules)
+    so the same merchant never needs relabelling twice."""
+
+    match: str        # lowercased substring of a transaction description
+    category: str
+
+    def __post_init__(self) -> None:
+        cleaned = (self.match or "").strip().lower()
+        if not cleaned:
+            raise ValueError("CategoryRule.match cannot be empty.")
+        self.match = cleaned
+        if self.category not in SPENDING_CATEGORIES:
+            raise ValueError(
+                f"Unknown category {self.category!r}. "
+                f"Must be one of: {', '.join(SPENDING_CATEGORIES)}."
+            )
+
+    def matches(self, description: str) -> bool:
+        return bool(description) and self.match in description.lower()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "CategoryRule":
+        return cls(
+            match=str(d.get("match", "")),
+            category=str(d.get("category", "other")),
+        )
+
+
+@dataclass
 class FinanceState:
     """The complete persisted state: debts, budget, accounts, transactions."""
 
@@ -230,6 +264,7 @@ class FinanceState:
     current_savings: float = 0.0  # liquid emergency fund balance
     accounts: list[Account] = field(default_factory=list)
     transactions: list[Transaction] = field(default_factory=list)
+    category_rules: list[CategoryRule] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.current_savings < 0:
@@ -245,6 +280,7 @@ class FinanceState:
             "current_savings": self.current_savings,
             "accounts": [a.to_dict() for a in self.accounts],
             "transactions": [t.to_dict() for t in self.transactions],
+            "category_rules": [r.to_dict() for r in self.category_rules],
         }
 
     @classmethod
@@ -257,6 +293,10 @@ class FinanceState:
             accounts=[Account.from_dict(x) for x in d.get("accounts", [])],
             transactions=[
                 Transaction.from_dict(x) for x in d.get("transactions", [])
+            ],
+            category_rules=[
+                CategoryRule.from_dict(x)
+                for x in d.get("category_rules", [])
             ],
         )
 

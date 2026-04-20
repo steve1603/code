@@ -9,6 +9,7 @@ Everything here is pure — no I/O, no Qt — so it's cheap to test.
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
@@ -47,6 +48,27 @@ class CategoryTrend:
     rolling_3mo: float               # avg of up-to-3 prior months
     delta_vs_prev: float             # latest - previous
     delta_vs_3mo: float              # latest - rolling_3mo
+    # month → % change vs the previous month in this category.
+    # First month (and any month with a 0 base) is None.
+    pct_by_month: dict[str, float | None] = field(default_factory=dict)
+
+
+@dataclass
+class Recurring:
+    """A merchant/amount combo that shows up in ≥2 months.
+
+    Powers the 'Recurring charges' card: lets the user see their
+    subscription footprint and the dollars those commitments will eat
+    over a year at the current cadence.
+    """
+
+    description: str             # cleaned/normalized merchant key
+    account: str
+    category: str
+    typical_amount: float        # median magnitude seen
+    months_seen: list[str]       # e.g. ["2026-01", "2026-02", "2026-03"]
+    monthly_cost: float          # typical_amount * avg occurrences/mo
+    yearly_cost: float           # monthly_cost * 12
 
 
 @dataclass
@@ -133,6 +155,19 @@ def category_trends(
         prev_v = row.get(prev, 0.0) if prev else 0.0
         prior_vs = [row.get(m, 0.0) for m in prior_months] or [0.0]
         rolling = mean(prior_vs)
+
+        # Percent change vs the previous month in this category, per
+        # month. The first month has no predecessor; months where the
+        # base is 0 get None (can't divide).
+        pct_by_month: dict[str, float | None] = {}
+        for i, m in enumerate(months):
+            if i == 0:
+                pct_by_month[m] = None
+                continue
+            pct_by_month[m] = _pct_change(
+                row.get(m, 0.0), row.get(months[i - 1], 0.0),
+            )
+
         out.append(CategoryTrend(
             category=cat,
             by_month=dict(row),
@@ -141,6 +176,7 @@ def category_trends(
             rolling_3mo=rolling,
             delta_vs_prev=latest_v - prev_v,
             delta_vs_3mo=latest_v - rolling,
+            pct_by_month=pct_by_month,
         ))
 
     out.sort(key=lambda t: t.latest, reverse=True)
@@ -324,3 +360,172 @@ def projected_monthly_spending(transactions: Iterable[Transaction]) -> float:
         return 0.0
     tail = sums[-3:]
     return mean(s.spending for s in tail)
+
+
+def total_spending_by_month(
+    transactions: Iterable[Transaction],
+) -> dict[str, float]:
+    """Month → total non-transfer/non-income spending magnitude.
+
+    Feeds the /trends line chart's primary series. Mirrors the logic
+    used by `monthly_summaries(...).spending` but returns a flat
+    dict keyed by month string for easy chart consumption.
+    """
+    out: dict[str, float] = {}
+    for tx in transactions:
+        if tx.amount >= 0:
+            continue
+        if tx.category in NON_SPENDING_CATEGORIES:
+            continue
+        out[tx.month] = out.get(tx.month, 0.0) + (-tx.amount)
+    return out
+
+
+def monthly_deltas(
+    totals: dict[str, float],
+) -> list[tuple[str, str, float, float | None]]:
+    """Produce (prev, next, $ delta, % delta) pairs across consecutive
+    months. Useful for rendering side-panel "Jan → Feb +$340 +12%"
+    cards beside the line chart.
+    """
+    months = sorted(totals)
+    out: list[tuple[str, str, float, float | None]] = []
+    for a, b in zip(months, months[1:]):
+        av = totals.get(a, 0.0)
+        bv = totals.get(b, 0.0)
+        out.append((a, b, bv - av, _pct_change(bv, av)))
+    return out
+
+
+# Merchant name cleanup — strip store/location numbers, city/state
+# suffixes, dates, and transaction-id gunk so that "TACO BELL 037203
+# SUGAR LAND TX" collapses to the same key as "TACO BELL 012345 OMAHA
+# NE". Used by both top_merchants() and detect_recurring().
+_MERCHANT_NOISE = [
+    re.compile(r"#\s*\d+", re.IGNORECASE),           # store numbers
+    re.compile(r"\b\d{4,}\b"),                       # long digit runs
+    re.compile(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b"),  # dates
+    re.compile(r"\b[A-Z]{2}\b$"),                    # trailing US state
+    re.compile(
+        r"\b(debit\s+card\s+purchase|recurring\s+deb\s+card\s+purch|"
+        r"pos\s+debit|ach\s+(?:debit|withdrawal|credit)|"
+        r"check\s+card|card\s+purchase|purchase)\b",
+        re.IGNORECASE,
+    ),
+]
+_MERCHANT_WS = re.compile(r"\s+")
+
+
+def _normalize_merchant(description: str) -> str:
+    """Collapse a raw description to a stable merchant key."""
+    if not description:
+        return ""
+    s = description
+    for p in _MERCHANT_NOISE:
+        s = p.sub(" ", s)
+    # Drop any non-alphanumeric-or-space fluff.
+    s = re.sub(r"[^A-Za-z0-9 &'/-]+", " ", s)
+    s = _MERCHANT_WS.sub(" ", s).strip()
+    # Trim trailing single-letter tokens (usually state halves after
+    # the 2-letter state regex ran).
+    while s and len(s.rsplit(" ", 1)[-1]) <= 1:
+        parts = s.rsplit(" ", 1)
+        if len(parts) == 1:
+            break
+        s = parts[0].strip()
+    return s.upper()
+
+
+def top_merchants(
+    transactions: Iterable[Transaction],
+    month: str,
+    n: int = 10,
+) -> list[tuple[str, float]]:
+    """Biggest single-merchant outflows for `month`.
+
+    Returns (merchant_label, total_magnitude) pairs, sorted desc.
+    Income/transfer categories are skipped so the list reflects real
+    outflows. Merchants are normalized so the same store with different
+    branch numbers rolls up into one row.
+    """
+    totals: dict[str, float] = {}
+    for tx in transactions:
+        if tx.month != month:
+            continue
+        if tx.amount >= 0:
+            continue
+        if tx.category in NON_SPENDING_CATEGORIES:
+            continue
+        key = _normalize_merchant(tx.description) or tx.description.strip()
+        if not key:
+            continue
+        totals[key] = totals.get(key, 0.0) + (-tx.amount)
+    ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
+    return ranked[:n]
+
+
+def detect_recurring(
+    transactions: Iterable[Transaction],
+    min_months: int = 2,
+) -> list[Recurring]:
+    """Find merchants billing the same amount (±10%) in ≥ `min_months`
+    distinct months. Each group becomes one `Recurring`.
+
+    This is a rule-light heuristic — it handles the ~60-80% of
+    subscriptions that hit on a monthly-ish cadence with a stable
+    amount (Netflix, Experian, OPPD). Irregular or variable-amount
+    charges (utilities that fluctuate, annual memberships) are
+    intentionally skipped.
+    """
+    # Bucket transactions by (merchant_key, account) and by rounded
+    # amount-tier so "Netflix $15.99" doesn't cluster with "Netflix
+    # $22.99". Tolerance is ±10% so slight promo/tax changes don't
+    # split a group.
+    groups: dict[tuple[str, str, int], list[Transaction]] = {}
+    for tx in transactions:
+        if tx.amount >= 0:
+            continue
+        if tx.category in NON_SPENDING_CATEGORIES:
+            continue
+        key = _normalize_merchant(tx.description)
+        if not key:
+            continue
+        amt = -tx.amount
+        if amt < 1.0:
+            continue
+        # Tier by 10%-wide buckets so ±10% stays in the same group.
+        from math import log10, floor
+        if amt <= 0:
+            tier = 0
+        else:
+            tier = int(floor(log10(amt) * 10))  # coarse logarithmic bucket
+        groups.setdefault((key, tx.account or "", tier), []).append(tx)
+
+    recurring: list[Recurring] = []
+    for (merchant, account, _tier), items in groups.items():
+        months_seen = sorted({t.month for t in items})
+        if len(months_seen) < min_months:
+            continue
+        amounts = sorted(-t.amount for t in items)
+        median_amt = amounts[len(amounts) // 2]
+        # Filter out groups where the spread is wider than ±25% — that
+        # signals a variable-amount merchant rather than a subscription.
+        if amounts and amounts[0] > 0:
+            spread = (amounts[-1] - amounts[0]) / amounts[0]
+            if spread > 0.25:
+                continue
+        # Pick the most common category for this merchant.
+        cats = [t.category for t in items]
+        category = max(set(cats), key=cats.count)
+        monthly = median_amt * (len(items) / max(1, len(months_seen)))
+        recurring.append(Recurring(
+            description=merchant.title(),
+            account=account,
+            category=category,
+            typical_amount=round(median_amt, 2),
+            months_seen=months_seen,
+            monthly_cost=round(monthly, 2),
+            yearly_cost=round(monthly * 12, 2),
+        ))
+    recurring.sort(key=lambda r: r.yearly_cost, reverse=True)
+    return recurring

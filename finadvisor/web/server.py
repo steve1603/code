@@ -26,7 +26,8 @@ from finadvisor.importers.csv_importer import (
 )
 from finadvisor.importers import bank_statement, pdf_importer
 from finadvisor.models import (
-    Account, Budget, Debt, Transaction as StoredTransaction,
+    Account, Budget, CategoryRule, Debt,
+    Transaction as StoredTransaction,
 )
 from finadvisor.report import run_all
 from finadvisor import spending as spending_module
@@ -97,6 +98,22 @@ def _str(form: dict[str, list[str]], key: str, default: str = "") -> str:
     return (form.get(key, [default])[0] or default).strip()
 
 
+def _rule_match_from_description(description: str) -> str:
+    """Derive a durable `CategoryRule.match` substring from a raw
+    transaction description. We strip store numbers / location suffixes
+    via `spending._normalize_merchant`, then keep only the first few
+    tokens — enough to identify the merchant ("NETFLIX COM", "OPPD
+    AUTOPAY") without being so specific that small variations miss.
+    """
+    normalized = spending_module._normalize_merchant(description)
+    if not normalized:
+        return description.strip().lower()[:32]
+    # Keep up to the first three tokens so "RECURRING DEB CARD PURCH
+    # EXPERIAN CREDIT REPORT" collapses to "experian credit report".
+    tokens = normalized.split()
+    return " ".join(tokens[:3]).lower()
+
+
 def _parse_multipart(content_type: str, body: bytes) -> tuple[
     dict[str, list[str]], dict[str, list[tuple[str, bytes]]]
 ]:
@@ -159,7 +176,7 @@ def _ingest_statement(
     ledger: list[StoredTransaction] = []
     for tx in parsed:
         iso_date, amount, category = bank_statement.transaction_to_ledger(
-            tx, md, account_name,
+            tx, md, account_name, rules=state.category_rules,
         )
         try:
             ledger.append(StoredTransaction(
@@ -331,20 +348,32 @@ def make_handler(store_path: Path):
                     insights = spending_module.build_insights(
                         state.transactions, trends=trends,
                     )
+                    latest_month = summaries[-1].month if summaries else ""
                     per_account = (
                         spending_module.totals_by_account(
-                            state.transactions, summaries[-1].month
+                            state.transactions, latest_month
                         ) if summaries else {}
                     )
                     breakdown = (
                         spending_module.account_category_breakdown(
-                            state.transactions, summaries[-1].month
+                            state.transactions, latest_month
                         ) if summaries else {}
+                    )
+                    merchants = (
+                        spending_module.top_merchants(
+                            state.transactions, latest_month
+                        ) if summaries else []
+                    )
+                    recurring = spending_module.detect_recurring(
+                        state.transactions
                     )
                     return self._html(
                         templates.render_spending(
                             state, summaries, insights, per_account,
-                            breakdown=breakdown, flash=flash,
+                            breakdown=breakdown,
+                            merchants=merchants,
+                            recurring=recurring,
+                            flash=flash,
                         )
                     )
                 if path == "/trends":
@@ -362,11 +391,17 @@ def make_handler(store_path: Path):
                     summaries = spending_module.monthly_summaries(
                         state.transactions
                     )
+                    totals_map = spending_module.total_spending_by_month(
+                        state.transactions
+                    )
+                    deltas = spending_module.monthly_deltas(totals_map)
                     return self._html(
                         templates.render_trends(
                             state, trends, months, projected,
                             income_by_month=income_map,
                             summaries=summaries,
+                            totals_by_month=totals_map,
+                            deltas=deltas,
                             flash=flash,
                         )
                     )
@@ -815,10 +850,17 @@ def make_handler(store_path: Path):
             Each row the template rendered posts back `category_<idx>`
             for its state-position index. We update only rows where
             the category actually changed, so spurious resubmits don't
-            churn the JSON store.
+            churn the JSON store. If `save_rule_<idx>` is present for
+            a changed row, we also persist a `CategoryRule` so future
+            imports of transactions with a similar description are
+            auto-categorized the same way.
             """
             state = self._state()
             changed = 0
+            rules_added = 0
+            existing_rules = {
+                (r.match, r.category) for r in state.category_rules
+            }
             for key, values in form.items():
                 if not key.startswith("category_"):
                     continue
@@ -837,16 +879,32 @@ def make_handler(store_path: Path):
                         continue
                     # Use replace-style mutation since Transaction is a
                     # frozen-ish dataclass validated in __post_init__.
-                    from dataclasses import replace as _replace
-                    state.transactions[idx] = _replace(tx, category=new_cat)
+                    state.transactions[idx] = replace(tx, category=new_cat)
                     changed += 1
+                    if form.get(f"save_rule_{idx}"):
+                        match = _rule_match_from_description(tx.description)
+                        if match:
+                            key_pair = (match, new_cat)
+                            if key_pair not in existing_rules:
+                                try:
+                                    state.category_rules.append(
+                                        CategoryRule(match=match, category=new_cat)
+                                    )
+                                    existing_rules.add(key_pair)
+                                    rules_added += 1
+                                except ValueError:
+                                    pass
                 except ValueError:
                     continue  # unknown category slipped through
             if changed:
                 self._save(state)
-                _set_flash(
-                    "success", f"Updated {changed} transaction categor(y/ies).",
-                )
+                msg = f"Updated {changed} transaction categor(y/ies)."
+                if rules_added:
+                    msg += (
+                        f" Saved {rules_added} rule(s) — future imports "
+                        f"will apply them automatically."
+                    )
+                _set_flash("success", msg)
             else:
                 _set_flash("error", "No category changes to save.")
             # Preserve filters if any came in via form → redirect target.
