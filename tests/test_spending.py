@@ -715,6 +715,46 @@ class MonthlyCashPlanTests(unittest.TestCase):
         self.assertIn("Import", plan.headline)
 
 
+class BillCalendarTests(unittest.TestCase):
+    """Recurring charges pinned to their usual day of the month."""
+
+    def _txs(self) -> list[Transaction]:
+        txs = []
+        for month in ("2026-01", "2026-02"):
+            txs.extend([
+                Transaction(date=f"{month}-01", account="Checking",
+                            description="FREEDOM MORTGAGE",
+                            amount=-1850.0, category="home"),
+                Transaction(date=f"{month}-15", account="Checking",
+                            description="NETFLIX.COM",
+                            amount=-15.99, category="subscriptions"),
+            ])
+        return txs
+
+    def test_entries_sorted_by_day(self):
+        from finadvisor.spending import bill_calendar
+        entries = bill_calendar(self._txs())
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0].day, 1)
+        self.assertIn("Mortgage", entries[0].description)
+        self.assertEqual(entries[1].day, 15)
+        self.assertIn("Netflix", entries[1].description)
+
+    def test_one_off_charges_excluded(self):
+        from finadvisor.spending import bill_calendar
+        txs = self._txs() + [
+            Transaction(date="2026-01-20", account="Checking",
+                        description="ONE TIME STORE",
+                        amount=-99.0, category="shopping"),
+        ]
+        entries = bill_calendar(txs)
+        self.assertEqual(len(entries), 2)  # one-off didn't make the cut
+
+    def test_empty_transactions(self):
+        from finadvisor.spending import bill_calendar
+        self.assertEqual(bill_calendar([]), [])
+
+
 class NegativeCashflowAlarmTests(unittest.TestCase):
     def test_alarm_triggers_when_spending_exceeds_income(self):
         from finadvisor.spending import negative_cashflow_alarm

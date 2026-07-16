@@ -30,6 +30,7 @@ from finadvisor.models import (
     Transaction as StoredTransaction,
 )
 from finadvisor.report import run_all
+from finadvisor import scenarios as scenarios_module
 from finadvisor import spending as spending_module
 from finadvisor.web import templates
 
@@ -359,11 +360,25 @@ def make_handler(store_path: Path):
                         state.transactions,
                         monthly_income=state.budget.monthly_income,
                     )
+                    stress = scenarios_module.stress_test(
+                        state.transactions,
+                        state.debts,
+                        monthly_income=state.budget.monthly_income,
+                        current_savings=state.current_savings,
+                        household_size=state.household_size,
+                    )
+                    ladder = scenarios_module.savings_ladder(
+                        state.current_savings,
+                        stress.monthly_essentials,
+                        household_size=state.household_size,
+                    )
                     return self._html(
                         templates.render_dashboard(
                             state, report, flash=flash,
                             cash_plan=cash_plan,
                             alarm=alarm_tuple if alarm_tuple[0] else None,
+                            stress=stress,
+                            ladder=ladder,
                         )
                     )
                 if path == "/debts":
@@ -395,6 +410,14 @@ def make_handler(store_path: Path):
                     except ValueError:
                         extra = 0.0
                     extra = max(0.0, extra)
+                    try:
+                        lump = float(query.get("lump", ["0"])[0] or 0)
+                    except ValueError:
+                        lump = 0.0
+                    lump = max(0.0, lump)
+                    windfall = scenarios_module.windfall_impact(
+                        state.debts, state.budget, lump,
+                    ) if lump > 0 else None
                     # Auto-populate: if the user hasn't typed an extra
                     # amount, suggest their current surplus.
                     suggested_extra = max(
@@ -422,6 +445,8 @@ def make_handler(store_path: Path):
                             report, flash=flash, extra=extra, whatif=whatif,
                             suggested_extra=suggested_extra,
                             candidate_debts=candidate_debts,
+                            lump=lump,
+                            windfall=windfall,
                         )
                     )
                 if path == "/spending":
@@ -455,12 +480,16 @@ def make_handler(store_path: Path):
                     recurring = spending_module.detect_recurring(
                         state.transactions
                     )
+                    calendar = spending_module.bill_calendar(
+                        state.transactions
+                    )
                     return self._html(
                         templates.render_spending(
                             state, summaries, insights, per_account,
                             breakdown=breakdown,
                             merchants=merchants,
                             recurring=recurring,
+                            calendar=calendar,
                             flash=flash,
                         )
                     )
@@ -1006,10 +1035,10 @@ def make_handler(store_path: Path):
             Each row the template rendered posts back `category_<idx>`
             for its state-position index. We update only rows where
             the category actually changed, so spurious resubmits don't
-            churn the JSON store. If `save_rule_<idx>` is present for
-            a changed row, we also persist a `CategoryRule` so future
-            imports of transactions with a similar description are
-            auto-categorized the same way.
+            churn the JSON store. Every changed row silently persists a
+            `CategoryRule` so future imports of transactions with a
+            similar description are auto-categorized the same way —
+            the user should never have to correct a merchant twice.
             """
             state = self._state()
             changed = 0
@@ -1037,19 +1066,18 @@ def make_handler(store_path: Path):
                     # frozen-ish dataclass validated in __post_init__.
                     state.transactions[idx] = replace(tx, category=new_cat)
                     changed += 1
-                    if form.get(f"save_rule_{idx}"):
-                        match = _rule_match_from_description(tx.description)
-                        if match:
-                            key_pair = (match, new_cat)
-                            if key_pair not in existing_rules:
-                                try:
-                                    state.category_rules.append(
-                                        CategoryRule(match=match, category=new_cat)
-                                    )
-                                    existing_rules.add(key_pair)
-                                    rules_added += 1
-                                except ValueError:
-                                    pass
+                    match = _rule_match_from_description(tx.description)
+                    if match:
+                        key_pair = (match, new_cat)
+                        if key_pair not in existing_rules:
+                            try:
+                                state.category_rules.append(
+                                    CategoryRule(match=match, category=new_cat)
+                                )
+                                existing_rules.add(key_pair)
+                                rules_added += 1
+                            except ValueError:
+                                pass
                 except ValueError:
                     continue  # unknown category slipped through
             if changed:

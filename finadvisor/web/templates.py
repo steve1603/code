@@ -96,6 +96,16 @@ ul.recs li { margin-bottom: 6px; }
 .flash { margin: 12px 0; padding: 10px 14px; border-radius: 6px;
   background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
 .flash.error { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+details.help { margin: 10px 0; border: 1px dashed #cbd5e1;
+  border-radius: 8px; background: #f8fafc; }
+details.help summary { cursor: pointer; padding: 8px 12px; font-size: 13px;
+  font-weight: 600; color: #475569; list-style: none; }
+details.help summary::before { content: "? "; display: inline-block;
+  width: 18px; height: 18px; line-height: 18px; text-align: center;
+  border-radius: 50%; background: #2563eb; color: white; font-size: 12px;
+  margin-right: 8px; }
+details.help[open] summary { border-bottom: 1px dashed #cbd5e1; }
+details.help .body { padding: 10px 14px; font-size: 13px; color: #374151; }
 """
 
 
@@ -105,6 +115,18 @@ def _esc(s) -> str:
 
 def _money(x: float) -> str:
     return f"${x:,.2f}"
+
+
+def _explainer(summary: str, body: str) -> str:
+    """Collapsible inline help — a native <details> block, zero JS.
+
+    `body` may contain simple HTML (lists, <strong>) written by us;
+    caller-supplied dynamic text must be escaped before inclusion.
+    """
+    return (
+        f'<details class="help"><summary>{_esc(summary)}</summary>'
+        f'<div class="body">{body}</div></details>'
+    )
 
 
 def _nav(active: str) -> str:
@@ -327,12 +349,98 @@ def _render_cash_plan(plan) -> str:
 """
 
 
+def _render_stress_test(stress) -> str:
+    """'What if I lost my job?' card."""
+    if stress is None:
+        return ""
+    runway = stress.runway_months_full_loss
+    sev = (
+        "severity-good" if runway >= 6
+        else "severity-warn" if runway >= 2
+        else "severity-urgent"
+    )
+    one_income = ""
+    if stress.one_income_applicable:
+        if stress.runway_months_one_income is None:
+            one_income = (
+                '<div class="card"><div class="label">One income lost</div>'
+                '<div class="value" style="color:#059669">Covered</div></div>'
+            )
+        else:
+            one_income = (
+                '<div class="card"><div class="label">One income lost</div>'
+                f'<div class="value">{stress.runway_months_one_income:.1f} mo'
+                '</div></div>'
+            )
+    notes_html = ""
+    if stress.notes:
+        notes_html = (
+            '<ul class="recs" style="margin-top:10px;margin-bottom:0">'
+            + "".join(f"<li>{_esc(n)}</li>" for n in stress.notes)
+            + "</ul>"
+        )
+    runway_str = (
+        f"{runway:.1f} mo" if runway != float("inf") else "∞"
+    )
+    return f"""
+<section style="background:white;border:1px solid #e5e7eb;
+                border-radius:10px;padding:16px;margin:16px 0">
+  <h3 style="margin-top:0">Stress test — what if income stopped?</h3>
+  <div class="banner {sev}" style="margin:0 0 12px 0">{_esc(stress.headline)}</div>
+  <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+    <div class="card"><div class="label">Monthly burn</div>
+      <div class="value">${stress.monthly_burn:,.0f}</div></div>
+    <div class="card"><div class="label">Savings</div>
+      <div class="value">${stress.savings:,.0f}</div></div>
+    <div class="card"><div class="label">All income lost</div>
+      <div class="value">{_esc(runway_str)}</div></div>
+    {one_income}
+  </div>
+  {notes_html}
+</section>
+"""
+
+
+def _render_savings_ladder(ladder) -> str:
+    """Emergency-fund ladder: starter → 3 mo → household target."""
+    if not ladder:
+        return ""
+    bars = []
+    for rung in ladder:
+        pct = min(100.0, rung.fraction * 100)
+        cls = "bar-good" if rung.reached else "bar-info"
+        check = " ✓" if rung.reached else ""
+        bars.append(
+            f'<div style="margin-bottom:10px">'
+            f'<div style="display:flex;justify-content:space-between;'
+            f'font-size:13px;margin-bottom:3px">'
+            f'<strong>{_esc(rung.label)}{check}</strong>'
+            f'<span class="muted">${rung.filled:,.0f} of '
+            f'${rung.target:,.0f}</span></div>'
+            f'<div class="bar {cls}"><span style="width:{pct:.1f}%">'
+            f'</span></div></div>'
+        )
+    return f"""
+<section style="background:white;border:1px solid #e5e7eb;
+                border-radius:10px;padding:16px;margin:16px 0">
+  <h3 style="margin-top:0">Savings ladder</h3>
+  {''.join(bars)}
+  <p class="muted" style="margin:4px 0 0">Fill each rung in order:
+  the starter fund breaks the paycheck-to-paycheck cycle, then the
+  bigger cushions protect against job loss. Update your balance on the
+  <a href="/budget">Budget</a> page.</p>
+</section>
+"""
+
+
 def render_dashboard(
     state: FinanceState,
     report: Report,
     flash: str = "",
     cash_plan=None,
     alarm: tuple[bool, float, float] | None = None,
+    stress=None,
+    ladder=None,
 ) -> str:
     def _find(prefix: str) -> StrategyResult | None:
         return next(
@@ -435,13 +543,32 @@ def render_dashboard(
 
     goal_picker = _render_goal_picker(state)
     cash_plan_html = _render_cash_plan(cash_plan)
+    stress_html = _render_stress_test(stress)
+    ladder_html = _render_savings_ladder(ladder)
+
+    explainer = _explainer(
+        "How to read this page",
+        "The <strong>Monthly Cash Plan</strong> is your marching order "
+        "for the month: cap day-to-day spending at the essentials "
+        "number, move the save amount into savings on payday, and pay "
+        "each debt the amount shown (the highest-APR debt gets every "
+        "spare dollar — that's the avalanche method, which minimizes "
+        "total interest). The <strong>stress test</strong> shows how "
+        "long savings would last if income stopped, and the "
+        "<strong>savings ladder</strong> tracks your emergency cushion. "
+        "Set your goal and household size below and everything "
+        "recalculates.",
+    )
 
     content = f"""
 <h2>Dashboard</h2>
+{explainer}
 {banner}
 {cash_plan_html}
 {goal_picker}
 <div class="cards">{cards_html}</div>
+{stress_html}
+{ladder_html}
 {spending_cards_html}
 """
     return render_page(
@@ -579,7 +706,28 @@ def render_debts(
 </form>
 """
 
-    content = f"<h2>Debts</h2>{summary}{table}{add_form}"
+    explainer = _explainer(
+        "What goes in each field?",
+        "Pull these from each account's latest statement (paper or the "
+        "lender's website/app):"
+        "<ul style='margin:6px 0 0;padding-left:18px'>"
+        "<li><strong>Name</strong> — anything you'll recognize. "
+        "Example: <em>USAA Visa</em>.</li>"
+        "<li><strong>Balance</strong> — the current amount owed. "
+        "Example: <em>6800</em>.</li>"
+        "<li><strong>APR</strong> — as a decimal, not a percent. "
+        "24.99% → <em>0.2499</em>; 6.5% → <em>0.065</em>. It's on the "
+        "statement under 'Interest Charge Calculation' or 'Note rate'."
+        "</li>"
+        "<li><strong>Minimum payment</strong> — the required monthly "
+        "amount. Example: <em>150</em>.</li>"
+        "<li><strong>Credit limit</strong> — cards only; drives the "
+        "utilization analysis. Example: <em>10000</em>.</li></ul>"
+        "<p style='margin:8px 0 0'>Shortcut: upload the account's PDF "
+        "statement on the <a href='/import'>Import</a> page and these "
+        "fields are extracted for you.</p>",
+    )
+    content = f"<h2>Debts</h2>{explainer}{summary}{table}{add_form}"
     return render_page("debts", "Debts", content, flash=flash)
 
 
@@ -666,8 +814,29 @@ def render_budget(
 </section>
 """
 
+    explainer = _explainer(
+        "What goes in each field?",
+        "<ul style='margin:0;padding-left:18px'>"
+        "<li><strong>Monthly income</strong> — combined take-home pay "
+        "after taxes, for the whole household. Example: two paychecks "
+        "of $2,100 twice a month each = <em>8400</em>.</li>"
+        "<li><strong>Monthly expenses</strong> — everything except debt "
+        "payments: rent/mortgage escrow, groceries, gas, utilities, "
+        "subscriptions. Example: <em>3400</em>. Don't guess — click "
+        "<strong>Use these values</strong> above and your statements "
+        "fill it in.</li>"
+        "<li><strong>Emergency savings</strong> — cash you could tap "
+        "tomorrow (checking buffer + savings account). Example: "
+        "<em>750</em>.</li>"
+        "<li><strong>Consolidation APR</strong> — the rate you think "
+        "you'd qualify for on a consolidation loan, as a decimal. "
+        "Example: <em>0.09</em> for 9%. Leave the default if unsure."
+        "</li></ul>",
+    )
+
     content = f"""
 <h2>Budget</h2>
+{explainer}
 <p class="muted">All figures are monthly. The advisor computes how much
 is left over after expenses and minimum debt payments. Import a bank
 statement to auto-fill these from your actual cashflow.</p>
@@ -712,6 +881,8 @@ def render_analysis(
     whatif: dict | None = None,
     suggested_extra: float = 0.0,
     candidate_debts: list | None = None,
+    lump: float = 0.0,
+    windfall=None,
 ) -> str:
     # If the caller derived a surplus from the budget but the user
     # hasn't typed a number into the what-if field yet, pre-fill it —
@@ -732,9 +903,22 @@ def render_analysis(
     <input name="extra" type="number" step="10" min="0" value="{displayed_extra:.0f}">
     {hint}
   </div>
+  <div style="flex:1 1 200px">
+    <label>Windfall: one-time lump $</label>
+    <input name="lump" type="number" step="100" min="0" value="{lump:.0f}">
+    <small class="muted" style="display:block;margin-top:4px">
+      Tax refund, bonus… applied to your highest-APR debt today.</small>
+  </div>
   <div><button type="submit">Recalculate</button></div>
 </form>
 """
+
+    windfall_banner = ""
+    if windfall is not None:
+        windfall_banner = (
+            f'<div class="banner severity-good"><strong>Windfall</strong>'
+            f'{_esc(windfall.headline)}</div>'
+        )
 
     # Candidate-debts panel: if there are no debts on file but we've
     # detected recurring debt-like payments (credit-card, loan) in the
@@ -821,11 +1005,25 @@ def render_analysis(
             f'{_esc(whatif["message"])}</div>'
         )
 
+    explainer = _explainer(
+        "How to read this page",
+        "Seven strategy tabs run automatically over your debts + "
+        "budget. <strong>Avalanche</strong> (highest APR first) "
+        "minimizes interest; <strong>Snowball</strong> (smallest "
+        "balance first) gives faster wins. The <strong>what-if</strong> "
+        "box shows the payoff impact of an extra monthly amount — "
+        "pre-filled with your actual surplus — and the <strong>"
+        "windfall</strong> box models a one-time lump sum like a tax "
+        "refund. Try $1,000 and watch the interest savings.",
+    )
+
     content = f"""
 <h2>Analysis</h2>
+{explainer}
 {whatif_form}
 {candidate_panel}
 {whatif_banner}
+{windfall_banner}
 <div class="banner"><strong>Next best action</strong>
 {_esc(report.next_best_action)}</div>
 {''.join(sections)}
@@ -866,9 +1064,29 @@ def _render_schedule(schedule: list[dict]) -> str:
 
 
 def render_import(preview: str = "", flash: str = "") -> str:
+    explainer = _explainer(
+        "What documents should I gather?",
+        "This is the only manual step — everything else derives from "
+        "what you import here. Worth collecting:"
+        "<ul style='margin:6px 0 0;padding-left:18px'>"
+        "<li><strong>Bank statements</strong> (checking + savings, "
+        "last 2–3 months) — powers spending, trends, the cash plan, "
+        "and budget auto-fill.</li>"
+        "<li><strong>Credit-card statements</strong> — one recent PDF "
+        "per card auto-fills balance, APR, minimum, and limit on the "
+        "Debts page.</li>"
+        "<li><strong>Loan statements</strong> (auto, student, "
+        "personal, mortgage) — same extraction; look for 'unpaid "
+        "principal' and 'note rate'.</li>"
+        "<li><strong>Pay stubs</strong> (optional) — handy to sanity-"
+        "check the income the advisor derives from deposits.</li>"
+        "</ul>"
+        "<p style='margin:8px 0 0'>Everything stays on this device — "
+        "no uploads, no network calls.</p>",
+    )
     content = f"""
 <h2>Import</h2>
-
+{explainer}
 <h3>Upload a PDF statement</h3>
 <p class="muted">Pick a credit-card or loan statement PDF. We'll extract
 balance, APR, minimum payment, and credit limit (best effort). You'll
@@ -1144,6 +1362,7 @@ def render_spending(
     breakdown=None,
     merchants=None,
     recurring=None,
+    calendar=None,
     flash: str = "",
 ) -> str:
     """Monthly cashflow view: headline cards + insight list + the most
@@ -1365,11 +1584,54 @@ def render_spending(
             f'<tbody>{rows_html}</tbody></table></div>'
         )
 
+    # ---- Bill calendar ------------------------------------------
+    calendar_html = ""
+    if calendar:
+        def _ordinal(n: int) -> str:
+            if 11 <= n % 100 <= 13:
+                return f"{n}th"
+            return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+        cal_rows = "".join(
+            f'<tr><td style="white-space:nowrap"><strong>'
+            f'{_esc(_ordinal(e.day))}</strong></td>'
+            f'<td>{_esc(e.description)}</td>'
+            f'<td>{_esc(e.category.replace("_", " ").title())}</td>'
+            f'<td class="muted" style="font-size:12px">{_esc(e.account)}</td>'
+            f'<td style="text-align:right">{_money(e.typical_amount)}</td>'
+            f'</tr>'
+            for e in calendar
+        )
+        cal_total = sum(e.typical_amount for e in calendar)
+        calendar_html = (
+            f'<h3 style="margin-top:24px">Bill calendar</h3>'
+            f'<p class="muted">Recurring charges by their usual posting '
+            f'day — about {_money(cal_total)} spread across the month. '
+            f'Line these up against your paydays so nothing lands before '
+            f'the cash does.</p>'
+            f'<div style="overflow-x:auto"><table>'
+            f'<thead><tr><th>Day</th><th>Bill</th><th>Category</th>'
+            f'<th>Account</th><th style="text-align:right">Typical $</th>'
+            f'</tr></thead><tbody>{cal_rows}</tbody></table></div>'
+        )
+
+    explainer = _explainer(
+        "How to read this page",
+        "A monthly picture of where money actually went, built from "
+        "your imported statements. <strong>Coach notes</strong> flag "
+        "the most actionable movements, the <strong>bill calendar"
+        "</strong> shows when recurring charges usually post, and "
+        "<strong>recurring charges</strong> totals your subscription "
+        "footprint for the year. Nothing here needs manual entry.",
+    )
+
     content = f"""
 <h2>Spending</h2>
+{explainer}
 <div class="cards">{cards_html}</div>
 {insights_html}
 {cat_html}
+{calendar_html}
 {merchants_html}
 {recurring_html}
 {breakdown_html}
@@ -1596,8 +1858,18 @@ def render_trends(
         f'sizing extra debt payments or an emergency fund target.</div>'
     )
 
+    explainer = _explainer(
+        "How to read this page",
+        "The line chart tracks total spending plus your three biggest "
+        "categories month by month; the cards beside it show each "
+        "month-over-month swing in dollars and percent. In the table, "
+        "green means you spent less than the month before, amber means "
+        "more. Watch for a category that climbs two months in a row — "
+        "that's a habit forming, not a one-off.",
+    )
     content = f"""
 <h2>Trends</h2>
+{explainer}
 {projection_banner}
 {chart_html}
 <div style="overflow-x:auto">
@@ -1708,10 +1980,6 @@ def render_transactions_page(
             f'<td style="text-align:right;{amount_cls}">'
             f"{_money(tx.amount)}</td>"
             f"<td>{_category_select(f'category_{idx}', tx.category)}</td>"
-            f'<td style="text-align:center">'
-            f'<label style="font-size:11px;color:#6b7280;font-weight:500">'
-            f'<input type="checkbox" name="save_rule_{idx}" value="1" '
-            f'style="width:auto;margin-right:4px"> save rule</label></td>'
             f'<input type="hidden" name="row_{idx}" value="1">'
             "</tr>"
         )
@@ -1720,6 +1988,13 @@ def render_transactions_page(
     total_income = sum(t.amount for _, t in indices_and_tx if t.amount > 0)
     content = f"""
 <h2>Transactions</h2>
+{_explainer(
+    "What is this page?",
+    "Every line from your imported statements. Fix a wrong category "
+    "with the dropdown and click Save — the advisor remembers the "
+    "correction automatically, so future imports of the same merchant "
+    "land in the right category without you touching them again.",
+)}
 {filters}
 <div class="banner severity-info" style="margin-top:12px">
   <strong>{len(indices_and_tx)} row(s)</strong>
@@ -1733,15 +2008,14 @@ def render_transactions_page(
     <thead><tr>
       <th>Date</th><th>Account</th><th>Description</th>
       <th style="text-align:right">Amount</th><th>Category</th>
-      <th style="text-align:center">Rule</th>
     </tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
   </div>
   <p class="muted" style="margin-top:10px">
-    Tick <strong>save rule</strong> on a row to remember the override
-    — future imports of transactions with a matching description will
-    be auto-categorized the same way.
+    Category changes are remembered automatically — future imports of
+    transactions with a matching description will be categorized the
+    same way, no extra clicks.
   </p>
   <p style="margin-top:12px">
     <button type="submit">Save category changes</button>

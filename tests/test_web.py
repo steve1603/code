@@ -731,6 +731,64 @@ class CashflowAlarmTests(WebTestBase):
         self.assertNotIn("Spending exceeds income", body)
 
 
+class AutonomyPagesTests(WebTestBase):
+    """Stress test + savings ladder on Dashboard, bill calendar on
+    Spending, windfall simulator on Analysis, explainers everywhere."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = []
+        for month in ("2026-01", "2026-02"):
+            txs.extend([
+                Transaction(date=f"{month}-03", account="Checking",
+                            description="PAYROLL", amount=5000.0,
+                            category="income"),
+                Transaction(date=f"{month}-01", account="Checking",
+                            description="FREEDOM MORTGAGE",
+                            amount=-1850.0, category="home"),
+                Transaction(date=f"{month}-15", account="Checking",
+                            description="NETFLIX.COM",
+                            amount=-15.99, category="subscriptions"),
+            ])
+        debts = [Debt(name="Visa", kind="credit_card", balance=3000,
+                      apr=0.2499, min_payment=90, credit_limit=8000)]
+        return FinanceState(
+            accounts=[acct], transactions=txs, debts=debts,
+            budget=Budget(monthly_income=5000, monthly_expenses=1900),
+            current_savings=2500, household_size=2,
+        )
+
+    def test_dashboard_shows_stress_test_and_ladder(self):
+        code, body = self.get("/")
+        self.assertEqual(code, 200)
+        self.assertIn("Stress test", body)
+        self.assertIn("Savings ladder", body)
+        self.assertIn("Starter fund", body)
+
+    def test_spending_shows_bill_calendar(self):
+        code, body = self.get("/spending")
+        self.assertEqual(code, 200)
+        self.assertIn("Bill calendar", body)
+        self.assertIn("Freedom Mortgage", body)
+
+    def test_analysis_windfall_simulator(self):
+        code, body = self.get("/analysis?lump=1000")
+        self.assertEqual(code, 200)
+        self.assertIn("Windfall", body)
+        self.assertIn("interest", body)
+
+    def test_analysis_without_lump_hides_windfall_banner(self):
+        _, body = self.get("/analysis")
+        self.assertNotIn('<strong>Windfall</strong>', body)
+
+    def test_pages_have_explainers(self):
+        for path in ("/", "/budget", "/debts", "/spending",
+                     "/analysis", "/import", "/transactions"):
+            _, body = self.get(path)
+            self.assertIn('<details class="help">', body,
+                          f"missing explainer on {path}")
+
+
 class TrendsChartTests(WebTestBase):
     """With multi-month data the /trends page renders an SVG line
     chart and at least one MoM delta card."""
@@ -818,8 +876,8 @@ class SpendingFeaturesTests(WebTestBase):
 
 
 class SaveRulePostTests(WebTestBase):
-    """Submitting the transactions form with `save_rule_<idx>=on`
-    persists a CategoryRule to state."""
+    """Every category change on /transactions silently persists a
+    CategoryRule — the user should never relabel a merchant twice."""
 
     def _initial_state(self) -> FinanceState:
         acct = Account(name="Checking", kind="checking")
@@ -830,12 +888,13 @@ class SaveRulePostTests(WebTestBase):
         ]
         return FinanceState(accounts=[acct], transactions=txs)
 
-    def test_save_rule_persists_category_rule(self):
-        # Before: no rules.
+    def test_category_change_persists_rule_automatically(self):
+        # Before: no rules. No checkbox in the form anymore — the
+        # rule is saved as a side effect of the category change.
         self.assertEqual(self.state().category_rules, [])
         code, _ = self.post(
             "/transactions/save",
-            {"category_0": "entertainment", "save_rule_0": "1"},
+            {"category_0": "entertainment"},
         )
         self.assertEqual(code, 200)
         s = self.state()
@@ -847,10 +906,10 @@ class SaveRulePostTests(WebTestBase):
         # "netflix com subscription" (first 3 tokens).
         self.assertIn("netflix", rule.match)
 
-    def test_save_rule_skipped_when_checkbox_absent(self):
+    def test_unchanged_category_saves_no_rule(self):
         code, _ = self.post(
             "/transactions/save",
-            {"category_0": "entertainment"},
+            {"category_0": "subscriptions"},  # same as current
         )
         self.assertEqual(code, 200)
         self.assertEqual(self.state().category_rules, [])
@@ -865,7 +924,7 @@ class SaveRulePostTests(WebTestBase):
         storage.save(s, self.store)
         code, _ = self.post(
             "/transactions/save",
-            {"category_0": "entertainment", "save_rule_0": "1"},
+            {"category_0": "entertainment"},
         )
         self.assertEqual(code, 200)
         self.assertEqual(len(self.state().category_rules), 1)

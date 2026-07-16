@@ -72,6 +72,22 @@ class Recurring:
 
 
 @dataclass
+class BillCalendarEntry:
+    """A recurring charge pinned to its typical day of the month.
+
+    Sorting these by day gives the user a month-at-a-glance bill
+    timeline: what's due when, so paydays and due dates can be lined
+    up without a spreadsheet.
+    """
+
+    day: int                    # typical (median) day-of-month, 1..31
+    description: str
+    category: str
+    account: str
+    typical_amount: float
+
+
+@dataclass
 class Insight:
     severity: str   # "good" | "info" | "warn" | "urgent"
     title: str
@@ -529,6 +545,52 @@ def detect_recurring(
         ))
     recurring.sort(key=lambda r: r.yearly_cost, reverse=True)
     return recurring
+
+
+def bill_calendar(
+    transactions: Iterable[Transaction],
+    min_months: int = 2,
+) -> list[BillCalendarEntry]:
+    """Recurring charges arranged by their typical day of the month.
+
+    Builds on `detect_recurring`: for every recurring merchant we find
+    the median calendar day its charges post on, producing a
+    chronological bill timeline ("1st — mortgage, 3rd — electric,
+    5th — Netflix…"). Entries sort by day, then by size descending so
+    the biggest obligations lead within a day.
+    """
+    txs = list(transactions)
+    recurring = detect_recurring(txs, min_months=min_months)
+    if not recurring:
+        return []
+
+    # Median posting day per (merchant, account) — same key shape
+    # detect_recurring grouped by, so lookups line up.
+    days: dict[tuple[str, str], list[int]] = {}
+    for tx in txs:
+        if tx.amount >= 0 or tx.category in NON_SPENDING_CATEGORIES:
+            continue
+        key = (_normalize_merchant(tx.description), tx.account or "")
+        try:
+            day = int(tx.date[8:10])
+        except (ValueError, IndexError):
+            continue
+        days.setdefault(key, []).append(day)
+
+    out: list[BillCalendarEntry] = []
+    for r in recurring:
+        seen = sorted(days.get((r.description.upper(), r.account), []))
+        if not seen:
+            continue
+        out.append(BillCalendarEntry(
+            day=seen[len(seen) // 2],
+            description=r.description,
+            category=r.category,
+            account=r.account,
+            typical_amount=r.typical_amount,
+        ))
+    out.sort(key=lambda e: (e.day, -e.typical_amount))
+    return out
 
 
 # --- Budget advice -----------------------------------------------------------
