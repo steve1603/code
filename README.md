@@ -18,7 +18,23 @@ get recommendations on how to pay them off. Built with Python + PySide6.
   4. **Budget / cashflow** — warns about over-extension, suggests how much extra to put toward debt.
   5. **Credit utilization** — for credit cards, warns when balances are too high vs. limits.
 
-## Install & run
+## Quick start (web UI — recommended)
+
+Requires only Python 3.10+. One command sets up everything (virtualenv
++ the single dependency) and starts the local server:
+
+```bash
+./start.sh          # Mac / Linux / Termux
+start.bat           # Windows (double-click works too)
+```
+
+Then open **http://127.0.0.1:8765** in any browser. Go to the
+**Import** page, upload a bank-statement PDF (or paste the statement
+text), and every other page — spending, trends, budget coach, monthly
+cash plan, payoff analysis — fills itself in. Ctrl+C stops the server;
+your data persists in `./finances.json`.
+
+## Install & run (desktop GUI)
 
 Requires Python 3.10 or newer.
 
