@@ -24,7 +24,7 @@ from finadvisor.importers.csv_importer import (
     REQUIRED_COLUMNS,
     _guess_kind_from_name,
 )
-from finadvisor.importers import bank_statement, pdf_importer
+from finadvisor.importers import bank_statement, pdf_importer, transactions_csv
 from finadvisor.models import (
     Account, Budget, CategoryRule, Debt,
     Transaction as StoredTransaction,
@@ -212,11 +212,24 @@ def _ingest_statement(
         number_hint=md.account_last4,
     ))
 
+    # Merchant → category map learned from prior months, so recurring
+    # charges the user already labeled land right automatically.
+    history = spending_module.history_category_map(state.transactions)
+
     ledger: list[StoredTransaction] = []
     for tx in parsed:
         iso_date, amount, category = bank_statement.transaction_to_ledger(
             tx, md, account_name, rules=state.category_rules,
         )
+        needs_review = False
+        if category == "other":
+            inherited = history.get(
+                spending_module._normalize_merchant(tx.description)
+            )
+            if inherited:
+                category = inherited
+            else:
+                needs_review = True
         try:
             ledger.append(StoredTransaction(
                 date=iso_date,
@@ -225,6 +238,7 @@ def _ingest_statement(
                 amount=amount,
                 category=category,
                 source=source_name,
+                needs_review=needs_review,
             ))
         except ValueError:
             # Malformed date or unknown category — skip rather than
@@ -533,6 +547,9 @@ def make_handler(store_path: Path):
                     active_account = (
                         query.get("account", [""])[0] or ""
                     ).strip()
+                    review_only = (
+                        query.get("review", [""])[0] or ""
+                    ).strip() == "1"
                     months = spending_module.months_of(state.transactions)
                     filtered = []
                     for i, tx in enumerate(state.transactions):
@@ -542,6 +559,8 @@ def make_handler(store_path: Path):
                             continue
                         if active_account and tx.account != active_account:
                             continue
+                        if review_only and not tx.needs_review:
+                            continue
                         filtered.append((i, tx))
                     # Most-recent first is easier to scan on a phone.
                     filtered.sort(key=lambda p: p[1].date, reverse=True)
@@ -549,6 +568,7 @@ def make_handler(store_path: Path):
                         templates.render_transactions_page(
                             state, filtered, months,
                             active_month, active_category, active_account,
+                            review_only=review_only,
                             flash=flash,
                         )
                     )
@@ -582,6 +602,8 @@ def make_handler(store_path: Path):
                 # Multipart routes (file upload) read the body raw.
                 if path == "/import/pdf":
                     return self._post_pdf_upload(ctype)
+                if path == "/import/transactions-csv":
+                    return self._post_transactions_csv_upload(ctype)
                 # All other POSTs use urlencoded forms.
                 form = self._read_form()
                 if path == "/debts/add":
@@ -773,6 +795,19 @@ def make_handler(store_path: Path):
             if not text.strip():
                 _set_flash("error", "No CSV content pasted.")
                 return self._redirect("/import")
+            # A transactions register pasted into the debts box is a
+            # common mix-up (Date/Amount headers instead of
+            # name/balance/apr) — point at the right section instead
+            # of a cryptic missing-columns error.
+            if transactions_csv.is_transactions_csv(text):
+                _set_flash(
+                    "error",
+                    "That looks like a bank transactions CSV (Date / "
+                    "Amount columns), not the debts template. Use the "
+                    "'Upload a transactions CSV' section above — it "
+                    "handles this format directly.",
+                )
+                return self._redirect("/import")
             try:
                 new_debts = _parse_csv_text(text)
             except ValueError as e:
@@ -794,6 +829,110 @@ def make_handler(store_path: Path):
                 f"Imported CSV: {added} added, {updated} updated.",
             )
             self._redirect("/debts")
+
+        def _post_transactions_csv_upload(self, content_type: str) -> None:
+            """Import a bank's transactions-CSV export (Date /
+            Description / Original Description / Category / Amount /
+            Status and common variants). Rows persist straight into
+            the ledger — dedup makes re-uploads safe."""
+            if not content_type.lower().startswith("multipart/form-data"):
+                _set_flash("error", "CSV upload requires a multipart form.")
+                return self._redirect("/import")
+            body = self._read_body()
+            try:
+                fields, files = _parse_multipart(content_type, body)
+            except Exception as e:
+                _set_flash("error", f"Could not parse upload: {e}")
+                return self._redirect("/import")
+            uploads = [
+                (name, payload) for name, payload in (files.get("csv") or [])
+                if name and payload
+            ]
+            if not uploads:
+                _set_flash("error", "No CSV file selected.")
+                return self._redirect("/import")
+            account_name = (
+                (fields.get("account_name", [""])[0] or "").strip()
+                or "Imported CSV"
+            )
+            account_kind = (
+                (fields.get("account_kind", ["checking"])[0] or "checking")
+                .strip()
+            )
+            if account_kind not in ("checking", "savings", "credit_card"):
+                account_kind = "checking"
+
+            state = self._state()
+            history = spending_module.history_category_map(
+                state.transactions
+            )
+            total_parsed = 0
+            total_pending = 0
+            total_unparsed = 0
+            sign_flipped = False
+            errors: list[str] = []
+            all_rows: list[StoredTransaction] = []
+            for filename, payload in uploads:
+                text = payload.decode("utf-8-sig", errors="replace")
+                try:
+                    result = transactions_csv.parse_transactions_csv(
+                        text,
+                        account_name,
+                        source=filename,
+                        rules=state.category_rules,
+                        account_kind=account_kind,
+                        history=history,
+                    )
+                except ValueError as e:
+                    errors.append(f"{filename}: {e}")
+                    continue
+                all_rows.extend(result.transactions)
+                total_parsed += len(result.transactions)
+                total_pending += result.skipped_pending
+                total_unparsed += result.skipped_unparsed
+                sign_flipped = sign_flipped or result.sign_flipped
+
+            if not all_rows:
+                msg = (
+                    " / ".join(errors) if errors
+                    else "No usable transaction rows found in the CSV."
+                )
+                _set_flash("error", msg)
+                return self._redirect("/import")
+
+            state.upsert_account(Account(
+                name=account_name, kind=account_kind,
+            ))
+            persisted = state.add_transactions(all_rows)
+            self._save(state)
+
+            parts = [f"imported {persisted} transaction(s) to "
+                     f"'{account_name}'"]
+            duplicates = total_parsed - persisted
+            if duplicates:
+                parts.append(f"{duplicates} duplicate(s) skipped")
+            if total_pending:
+                parts.append(f"{total_pending} pending row(s) skipped")
+            if total_unparsed:
+                parts.append(f"{total_unparsed} unreadable row(s) skipped")
+            if sign_flipped:
+                parts.append(
+                    "amounts were re-signed to match the ledger "
+                    "(income +, spending −)"
+                )
+            flagged = sum(1 for t in all_rows if t.needs_review)
+            if flagged:
+                parts.append(
+                    f"{flagged} couldn't be auto-categorized — "
+                    f"flagged as to-do for your review"
+                )
+            if errors:
+                parts.append(f"errors: {'; '.join(errors[:3])}")
+            _set_flash(
+                "error" if errors and persisted == 0 else "success",
+                "CSV import: " + ", ".join(parts) + ".",
+            )
+            self._redirect("/spending" if persisted else "/import")
 
         def _post_pdf_upload(self, content_type: str) -> None:
             if not content_type.lower().startswith("multipart/form-data"):
@@ -1043,9 +1182,31 @@ def make_handler(store_path: Path):
             state = self._state()
             changed = 0
             rules_added = 0
+            reviewed = 0
+            propagated = 0
+            corrections: list[tuple[str, str]] = []
             existing_rules = {
                 (r.match, r.category) for r in state.category_rules
             }
+            # "Mark all shown as reviewed": clear the to-do flag on
+            # every row the form displayed, even if untouched — the
+            # user has looked at them and confirmed the guesses.
+            if form.get("mark_reviewed"):
+                for key in form.keys():
+                    if not key.startswith("row_"):
+                        continue
+                    try:
+                        idx = int(key.split("_", 1)[1])
+                    except ValueError:
+                        continue
+                    if not (0 <= idx < len(state.transactions)):
+                        continue
+                    tx = state.transactions[idx]
+                    if tx.needs_review:
+                        state.transactions[idx] = replace(
+                            tx, needs_review=False,
+                        )
+                        reviewed += 1
             for key, values in form.items():
                 if not key.startswith("category_"):
                     continue
@@ -1064,8 +1225,12 @@ def make_handler(store_path: Path):
                         continue
                     # Use replace-style mutation since Transaction is a
                     # frozen-ish dataclass validated in __post_init__.
-                    state.transactions[idx] = replace(tx, category=new_cat)
+                    # A corrected category also resolves the to-do flag.
+                    state.transactions[idx] = replace(
+                        tx, category=new_cat, needs_review=False,
+                    )
                     changed += 1
+                    corrections.append((tx.description, new_cat))
                     match = _rule_match_from_description(tx.description)
                     if match:
                         key_pair = (match, new_cat)
@@ -1080,20 +1245,56 @@ def make_handler(store_path: Path):
                                 pass
                 except ValueError:
                     continue  # unknown category slipped through
-            if changed:
+            # Correlate: propagate each correction to OTHER still-
+            # flagged rows of the same merchant (recurring charges
+            # across prior months), so one fix clears the whole series.
+            if corrections:
+                merchant_fix = {}
+                for desc, cat in corrections:
+                    key = spending_module._normalize_merchant(desc)
+                    if key:
+                        merchant_fix[key] = cat
+                for i, tx in enumerate(state.transactions):
+                    if not tx.needs_review:
+                        continue
+                    key = spending_module._normalize_merchant(
+                        tx.description
+                    )
+                    if key in merchant_fix:
+                        state.transactions[i] = replace(
+                            tx,
+                            category=merchant_fix[key],
+                            needs_review=False,
+                        )
+                        propagated += 1
+
+            if changed or reviewed:
                 self._save(state)
-                msg = f"Updated {changed} transaction categor(y/ies)."
+                bits = []
+                if changed:
+                    bits.append(
+                        f"Updated {changed} transaction categor(y/ies)."
+                    )
                 if rules_added:
-                    msg += (
-                        f" Saved {rules_added} rule(s) — future imports "
+                    bits.append(
+                        f"Saved {rules_added} rule(s) — future imports "
                         f"will apply them automatically."
                     )
-                _set_flash("success", msg)
+                if propagated:
+                    bits.append(
+                        f"Applied the same fix to {propagated} matching "
+                        f"recurring row(s) from other months."
+                    )
+                if reviewed:
+                    bits.append(
+                        f"Cleared the to-do flag on {reviewed} row(s)."
+                    )
+                _set_flash("success", " ".join(bits))
             else:
                 _set_flash("error", "No category changes to save.")
             # Preserve filters if any came in via form → redirect target.
             params = []
-            for key in ("month", "category", "account"):
+            for key in ("month", "category", "account", "review"):
                 val = (form.get(key, [""])[0] or "").strip()
                 if val:
                     params.append(f"{key}={val}")

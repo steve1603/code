@@ -452,6 +452,32 @@ def _normalize_merchant(description: str) -> str:
     return s.upper()
 
 
+def history_category_map(
+    transactions: Iterable[Transaction],
+) -> dict[str, str]:
+    """Learn merchant → category from already-categorized history.
+
+    Powers auto-categorization on import: when a new row's category is
+    unknown, the same merchant's most common non-'other' category from
+    prior months is inherited — so a recurring charge you corrected in
+    January lands right every month after. Rows still awaiting review
+    are excluded so an unverified guess never teaches the map.
+    """
+    counts: dict[str, dict[str, int]] = {}
+    for tx in transactions:
+        if tx.category == "other" or getattr(tx, "needs_review", False):
+            continue
+        key = _normalize_merchant(tx.description)
+        if not key:
+            continue
+        bucket = counts.setdefault(key, {})
+        bucket[tx.category] = bucket.get(tx.category, 0) + 1
+    return {
+        merchant: max(cats.items(), key=lambda kv: kv[1])[0]
+        for merchant, cats in counts.items()
+    }
+
+
 def top_merchants(
     transactions: Iterable[Transaction],
     month: str,

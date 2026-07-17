@@ -546,6 +546,23 @@ def render_dashboard(
     stress_html = _render_stress_test(stress)
     ladder_html = _render_savings_ladder(ladder)
 
+    # To-do banner: transactions the importer couldn't categorize.
+    review_count = sum(
+        1 for t in state.transactions if getattr(t, "needs_review", False)
+    )
+    todo_html = ""
+    if review_count:
+        word = "transaction" if review_count == 1 else "transactions"
+        todo_html = (
+            '<div class="banner severity-warn">'
+            '<strong>To-do</strong>'
+            f'{review_count} {word} couldn\'t be auto-categorized. '
+            f'<a href="/transactions?review=1">Review and fix them</a> — '
+            f'each correction is remembered, so the same merchant is '
+            f'categorized automatically from then on.'
+            '</div>'
+        )
+
     explainer = _explainer(
         "How to read this page",
         "The <strong>Monthly Cash Plan</strong> is your marching order "
@@ -563,6 +580,7 @@ def render_dashboard(
     content = f"""
 <h2>Dashboard</h2>
 {explainer}
+{todo_html}
 {banner}
 {cash_plan_html}
 {goal_picker}
@@ -1069,9 +1087,10 @@ def render_import(preview: str = "", flash: str = "") -> str:
         "This is the only manual step — everything else derives from "
         "what you import here. Worth collecting:"
         "<ul style='margin:6px 0 0;padding-left:18px'>"
-        "<li><strong>Bank statements</strong> (checking + savings, "
-        "last 2–3 months) — powers spending, trends, the cash plan, "
-        "and budget auto-fill.</li>"
+        "<li><strong>Bank transactions</strong> (checking + savings, "
+        "last 2–3 months) — as statement PDFs or your bank's CSV "
+        "download; powers spending, trends, the cash plan, and budget "
+        "auto-fill.</li>"
         "<li><strong>Credit-card statements</strong> — one recent PDF "
         "per card auto-fills balance, APR, minimum, and limit on the "
         "Debts page.</li>"
@@ -1095,6 +1114,31 @@ get a confirmation screen to correct anything before saving.</p>
   <label>PDF files (you can select several at once)</label>
   <input type="file" name="pdf" accept="application/pdf,.pdf" multiple required>
   <p style="margin-top:12px"><button type="submit">Upload &amp; parse</button></p>
+</form>
+
+<h3 style="margin-top:24px">Upload a transactions CSV</h3>
+<p class="muted">Most banks offer a CSV download of your transactions.
+Headers like <strong>Date, Description, Original Description,
+Category, Amount, Status</strong> work out of the box (so do common
+variants — Debit/Credit columns, quoted values, pending rows are
+skipped automatically). The bank's own categories are mapped onto the
+advisor's, and re-uploading the same file never duplicates rows.</p>
+<form method="post" action="/import/transactions-csv"
+      enctype="multipart/form-data">
+  <div class="row">
+    <div><label>CSV file(s)</label>
+      <input type="file" name="csv" accept=".csv,text/csv" multiple required>
+    </div>
+    <div><label>Account name (as you want it shown)</label>
+      <input name="account_name" value="Checking" required></div>
+    <div><label>Account type</label>
+      <select name="account_kind">
+        <option value="checking" selected>Checking</option>
+        <option value="savings">Savings</option>
+        <option value="credit_card">Credit card</option>
+      </select></div>
+  </div>
+  <p style="margin-top:12px"><button type="submit">Import transactions</button></p>
 </form>
 
 <h3 style="margin-top:24px">Or paste bank-statement text</h3>
@@ -1907,6 +1951,7 @@ def render_transactions_page(
     active_month: str,
     active_category: str,
     active_account: str,
+    review_only: bool = False,
     flash: str = "",
 ) -> str:
     """All-transactions ledger with per-row category override.
@@ -1945,6 +1990,21 @@ def render_transactions_page(
         )
     )
 
+    review_count = sum(
+        1 for t in state.transactions if getattr(t, "needs_review", False)
+    )
+    review_toggle = ""
+    if review_count or review_only:
+        if review_only:
+            review_toggle = (
+                '<a class="btn secondary" href="/transactions">'
+                'Show all</a>'
+            )
+        else:
+            review_toggle = (
+                f'<a class="btn" href="/transactions?review=1">'
+                f'To-do: {review_count} to review</a>'
+            )
     filters = f"""
 <form method="get" action="/transactions"
       style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
@@ -1954,7 +2014,7 @@ def render_transactions_page(
     <select name="category">{cat_opts}</select></div>
   <div style="flex:1 1 140px"><label>Account</label>
     <select name="account">{acct_opts}</select></div>
-  <div><button type="submit">Filter</button></div>
+  <div><button type="submit">Filter</button> {review_toggle}</div>
 </form>
 """
 
@@ -1972,11 +2032,20 @@ def render_transactions_page(
     rows = []
     for idx, tx in indices_and_tx:
         amount_cls = "color:#059669" if tx.amount > 0 else "color:#1f2937"
+        desc_cell = _esc(tx.description[:80])
+        if getattr(tx, "needs_review", False):
+            desc_cell += (
+                ' <span title="The importer couldn\'t categorize this '
+                'row — pick a category and Save, or use Mark all '
+                'reviewed." style="background:#fef3c7;color:#92400e;'
+                'border-radius:4px;padding:1px 6px;font-size:11px;'
+                'font-weight:700;margin-left:6px">to-do</span>'
+            )
         rows.append(
             "<tr>"
             f"<td>{_esc(tx.date)}</td>"
             f'<td class="muted" style="font-size:12px">{_esc(tx.account)}</td>'
-            f"<td>{_esc(tx.description[:80])}</td>"
+            f"<td>{desc_cell}</td>"
             f'<td style="text-align:right;{amount_cls}">'
             f"{_money(tx.amount)}</td>"
             f"<td>{_category_select(f'category_{idx}', tx.category)}</td>"
@@ -1986,6 +2055,14 @@ def render_transactions_page(
 
     total_spend = sum(-t.amount for _, t in indices_and_tx if t.amount < 0)
     total_income = sum(t.amount for _, t in indices_and_tx if t.amount > 0)
+    shown_needs_review = any(
+        getattr(t, "needs_review", False) for _, t in indices_and_tx
+    )
+    mark_reviewed_btn = (
+        '<button type="submit" name="mark_reviewed" value="1" '
+        'class="secondary">Mark all shown as reviewed</button>'
+        if shown_needs_review else ""
+    )
     content = f"""
 <h2>Transactions</h2>
 {_explainer(
@@ -2015,12 +2092,15 @@ def render_transactions_page(
   <p class="muted" style="margin-top:10px">
     Category changes are remembered automatically — future imports of
     transactions with a matching description will be categorized the
-    same way, no extra clicks.
+    same way, no extra clicks. Rows tagged <strong>to-do</strong>
+    couldn't be auto-categorized; fixing their category clears the tag.
   </p>
   <p style="margin-top:12px">
     <button type="submit">Save category changes</button>
+    {mark_reviewed_btn}
     <a class="btn secondary" href="/spending">Back to spending</a>
   </p>
+  <input type="hidden" name="review" value="{'1' if review_only else ''}">
 </form>
 """
     return render_page(

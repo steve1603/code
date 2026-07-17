@@ -194,6 +194,9 @@ class Transaction:
     category: str = "other"
     source: str = ""   # filename or "pasted"
     note: str = ""     # optional user annotation
+    # True when the importer couldn't confidently categorize this row —
+    # surfaces as a "to do" so the user can review and correct it.
+    needs_review: bool = False
 
     def __post_init__(self) -> None:
         if self.category not in SPENDING_CATEGORIES:
@@ -233,6 +236,7 @@ class Transaction:
             category=d.get("category", "other"),
             source=d.get("source", ""),
             note=d.get("note", ""),
+            needs_review=bool(d.get("needs_review", False)),
         )
 
 

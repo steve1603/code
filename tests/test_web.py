@@ -731,6 +731,186 @@ class CashflowAlarmTests(WebTestBase):
         self.assertNotIn("Spending exceeds income", body)
 
 
+class TransactionsCSVUploadTests(WebTestBase):
+    """Uploading a bank's transactions-CSV export persists ledger rows
+    with mapped categories; re-uploads dedup; the debts-CSV paste box
+    redirects transaction registers to the right section."""
+
+    CSV = (
+        "Date,Description,Original Description,Category,Amount,Status\r\n"
+        "07/01/2026,Freedom Mortgage,FREEDOM MORTGAGE AUTOPAY,"
+        "Mortgage & Rent,-1850.00,Posted\r\n"
+        "07/02/2026,Paycheck,ACME PAYROLL,Paycheck,4200.00,Posted\r\n"
+        "07/05/2026,Netflix,NETFLIX.COM,Subscriptions,-15.99,Posted\r\n"
+        "07/06/2026,Amazon,AMZN MKTP,Shopping,-63.20,Pending\r\n"
+    ).encode()
+
+    @staticmethod
+    def _csv_multipart(
+        csv_bytes: bytes, account_name: str = "My Checking",
+        account_kind: str = "checking",
+    ) -> tuple[bytes, str]:
+        boundary = b"----csvbnd"
+        def field(name: str, value: str) -> bytes:
+            return (
+                b"--" + boundary + b"\r\n"
+                + f'Content-Disposition: form-data; name="{name}"'
+                  f"\r\n\r\n".encode()
+                + value.encode() + b"\r\n"
+            )
+        parts = [
+            b"--" + boundary + b"\r\n"
+            + b'Content-Disposition: form-data; name="csv"; '
+              b'filename="export.csv"\r\n'
+            + b"Content-Type: text/csv\r\n\r\n"
+            + csv_bytes + b"\r\n",
+            field("account_name", account_name),
+            field("account_kind", account_kind),
+        ]
+        body = b"".join(parts) + b"--" + boundary + b"--\r\n"
+        return body, f"multipart/form-data; boundary={boundary.decode()}"
+
+    def test_upload_persists_transactions(self):
+        body, ctype = self._csv_multipart(self.CSV)
+        code, html = self.post("/import/transactions-csv", body,
+                               content_type=ctype)
+        self.assertEqual(code, 200)
+        self.assertIn("imported 3 transaction(s)", html)
+        self.assertIn("1 pending row(s) skipped", html)
+        s = self.state()
+        self.assertEqual(len(s.transactions), 3)
+        by_desc = {t.description: t for t in s.transactions}
+        self.assertEqual(by_desc["Freedom Mortgage"].category, "home")
+        self.assertEqual(by_desc["Paycheck"].category, "income")
+        self.assertAlmostEqual(by_desc["Paycheck"].amount, 4200.0)
+        self.assertEqual(by_desc["Netflix"].account, "My Checking")
+        # Account record created too.
+        self.assertTrue(any(a.name == "My Checking" for a in s.accounts))
+
+    def test_reupload_dedupes(self):
+        body, ctype = self._csv_multipart(self.CSV)
+        self.post("/import/transactions-csv", body, content_type=ctype)
+        _, html = self.post("/import/transactions-csv", body,
+                            content_type=ctype)
+        self.assertIn("3 duplicate(s) skipped", html)
+        self.assertEqual(len(self.state().transactions), 3)
+
+    def test_user_rule_applied_on_import(self):
+        s = self.state()
+        s.category_rules.append(
+            CategoryRule(match="netflix", category="entertainment"),
+        )
+        storage.save(s, self.store)
+        body, ctype = self._csv_multipart(self.CSV)
+        self.post("/import/transactions-csv", body, content_type=ctype)
+        netflix = next(
+            t for t in self.state().transactions
+            if t.description == "Netflix"
+        )
+        self.assertEqual(netflix.category, "entertainment")
+
+    def test_import_page_has_csv_section(self):
+        _, body = self.get("/import")
+        self.assertIn("Upload a transactions CSV", body)
+        self.assertIn('action="/import/transactions-csv"', body)
+
+    def test_debts_paste_box_detects_transactions_csv(self):
+        _, html = self.post(
+            "/import",
+            {"csv": self.CSV.decode()},
+        )
+        self.assertIn("looks like a bank transactions CSV", html)
+        # Nothing was mangled into a debt.
+        self.assertEqual(self.state().debts, [])
+
+    def test_empty_upload_flashes_error(self):
+        body, ctype = self._csv_multipart(b"")
+        _, html = self.post("/import/transactions-csv", body,
+                            content_type=ctype)
+        self.assertIn("No CSV file selected", html)
+
+
+class ReviewTodoFlowTests(WebTestBase):
+    """Auto-categorization to-do flow: unknown merchants get flagged,
+    the Dashboard surfaces a to-do banner, fixing one row propagates
+    to matching recurring rows, and mark-reviewed clears flags."""
+
+    def _initial_state(self) -> FinanceState:
+        acct = Account(name="Checking", kind="checking")
+        txs = [
+            # Two months of the same unknown recurring charge, flagged.
+            Transaction(date="2026-06-02", account="Checking",
+                        description="LinkedIn", amount=-32.09,
+                        category="other", needs_review=True),
+            Transaction(date="2026-07-02", account="Checking",
+                        description="LinkedIn", amount=-32.09,
+                        category="other", needs_review=True),
+            # A clean row for contrast.
+            Transaction(date="2026-07-03", account="Checking",
+                        description="HYVEE", amount=-100.0,
+                        category="groceries"),
+        ]
+        return FinanceState(accounts=[acct], transactions=txs)
+
+    def test_dashboard_shows_todo_banner(self):
+        _, body = self.get("/")
+        self.assertIn("To-do", body)
+        self.assertIn("2 transactions couldn", body)
+        self.assertIn("/transactions?review=1", body)
+
+    def test_review_filter_shows_only_flagged(self):
+        _, body = self.get("/transactions?review=1")
+        self.assertIn("LinkedIn", body)
+        self.assertNotIn("HYVEE", body)
+        self.assertIn("to-do", body)  # badge
+
+    def test_fixing_one_row_propagates_to_matching_flagged_rows(self):
+        # Row 0 is the June LinkedIn charge — correct it.
+        code, _ = self.post(
+            "/transactions/save",
+            {"category_0": "subscriptions"},
+        )
+        self.assertEqual(code, 200)
+        s = self.state()
+        linkedin = [t for t in s.transactions
+                    if t.description == "LinkedIn"]
+        # BOTH months now categorized, neither flagged.
+        self.assertTrue(all(t.category == "subscriptions"
+                            for t in linkedin))
+        self.assertTrue(all(not t.needs_review for t in linkedin))
+        # And a rule was saved so future imports auto-apply.
+        self.assertTrue(any("linkedin" in r.match
+                            for r in s.category_rules))
+
+    def test_mark_reviewed_clears_flags_without_changes(self):
+        code, _ = self.post(
+            "/transactions/save",
+            {"mark_reviewed": "1", "row_0": "1", "row_1": "1",
+             "category_0": "other", "category_1": "other"},
+        )
+        self.assertEqual(code, 200)
+        s = self.state()
+        self.assertTrue(all(not t.needs_review for t in s.transactions))
+
+    def test_csv_import_uses_history_after_fix(self):
+        # Fix the flagged rows first (teaches history + saves a rule).
+        self.post("/transactions/save", {"category_0": "subscriptions"})
+        # Now import August's statement with the same charge.
+        csv_bytes = (
+            "Date,Description,Original Description,Category,Amount,Status\n"
+            "2026-08-02,LinkedIn,LinkedIn*P3043818790 855-,"
+            "Business Services,-32.09,Posted\n"
+        ).encode()
+        body, ctype = TransactionsCSVUploadTests._csv_multipart(
+            csv_bytes, account_name="Checking",
+        )
+        self.post("/import/transactions-csv", body, content_type=ctype)
+        s = self.state()
+        august = next(t for t in s.transactions if t.date == "2026-08-02")
+        self.assertEqual(august.category, "subscriptions")
+        self.assertFalse(august.needs_review)
+
+
 class AutonomyPagesTests(WebTestBase):
     """Stress test + savings ladder on Dashboard, bill calendar on
     Spending, windfall simulator on Analysis, explainers everywhere."""
