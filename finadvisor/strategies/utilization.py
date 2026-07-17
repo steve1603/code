@@ -75,6 +75,26 @@ def run(debts: list[Debt], budget: Budget, state: FinanceState) -> StrategyResul
             f"is {overall * 100:.1f}%. Nicely done."
         )
 
+    breakdown = []
+    for c in sorted(cards, key=lambda d: -(d.utilization or 0)):
+        util = c.utilization or 0.0
+        if util > 0.70:
+            bar_sev = "urgent"
+        elif util > 0.30:
+            bar_sev = "warn"
+        else:
+            bar_sev = "good"
+        breakdown.append({
+            "label": c.name,
+            "value": util * 100,
+            "max": 100.0,
+            "severity": bar_sev,
+            "caption": (
+                f"{_money(c.balance)} / {_money(c.credit_limit or 0)} "
+                f"({util * 100:.1f}%)"
+            ),
+        })
+
     return StrategyResult(
         title="Credit utilization",
         summary=summary,
@@ -85,4 +105,5 @@ def run(debts: list[Debt], budget: Budget, state: FinanceState) -> StrategyResul
             "cards_urgent": float(len(urgent)),
             "cards_warn": float(len(warn)),
         },
+        breakdown=breakdown,
     )

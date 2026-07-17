@@ -18,7 +18,23 @@ get recommendations on how to pay them off. Built with Python + PySide6.
   4. **Budget / cashflow** — warns about over-extension, suggests how much extra to put toward debt.
   5. **Credit utilization** — for credit cards, warns when balances are too high vs. limits.
 
-## Install & run
+## Quick start (web UI — recommended)
+
+Requires only Python 3.10+. One command sets up everything (virtualenv
++ the single dependency) and starts the local server:
+
+```bash
+./start.sh          # Mac / Linux / Termux
+start.bat           # Windows (double-click works too)
+```
+
+Then open **http://127.0.0.1:8765** in any browser. Go to the
+**Import** page, upload a bank-statement PDF (or paste the statement
+text), and every other page — spending, trends, budget coach, monthly
+cash plan, payoff analysis — fills itself in. Ctrl+C stops the server;
+your data persists in `./finances.json`.
+
+## Install & run (desktop GUI)
 
 Requires Python 3.10 or newer.
 
@@ -29,6 +45,25 @@ python -m finadvisor
 
 The main window opens. Your data is saved to `./finances.json` in the
 directory you launched from.
+
+### No Qt? Use the CLI or local web UI
+
+PySide6 can be hard to install on some platforms (Termux on Android,
+minimal servers). The same engine is usable without Qt:
+
+```bash
+# One-shot commands:
+python -m finadvisor.cli report
+python -m finadvisor.cli add --name "Visa" --kind credit_card \
+    --balance 4000 --apr 0.2499 --min-payment 100 --credit-limit 5000
+
+# Or a local web UI viewable in any browser (including your phone):
+python -m finadvisor.web           # http://127.0.0.1:8765
+python -m finadvisor.web --port 9000
+```
+
+The CLI, web UI, and GUI all read and write the **same** `./finances.json`
+file, so you can bounce between them on the same machine.
 
 ## Importing debts
 

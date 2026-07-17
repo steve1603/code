@@ -24,3 +24,7 @@ class StrategyResult:
     schedule: list[dict[str, Any]] = field(default_factory=list)
     # Summary numbers for dashboard display
     metrics: dict[str, float] = field(default_factory=dict)
+    # Optional per-item breakdown the Analysis page renders as horizontal bars.
+    # Each entry: {"label": str, "value": float, "max": float,
+    #              "severity": "info"|"good"|"warn"|"urgent", "caption": str}
+    breakdown: list[dict[str, Any]] = field(default_factory=list)

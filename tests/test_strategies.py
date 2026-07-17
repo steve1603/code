@@ -2,15 +2,25 @@ import unittest
 
 from finadvisor.models import Budget, Debt, FinanceState
 from finadvisor.report import run_all
-from finadvisor.strategies import avalanche, budget as budget_strategy, consolidation, snowball, utilization
+from finadvisor.strategies import (
+    avalanche,
+    budget as budget_strategy,
+    consolidation,
+    emergency_fund,
+    long_term,
+    snowball,
+    utilization,
+)
 from finadvisor.strategies.base import Severity
 
 
-def _state(debts, income=6000.0, expenses=3000.0, consolidation_apr=0.09):
+def _state(debts, income=6000.0, expenses=3000.0, consolidation_apr=0.09,
+           current_savings=0.0):
     return FinanceState(
         debts=debts,
         budget=Budget(monthly_income=income, monthly_expenses=expenses),
         consolidation_apr=consolidation_apr,
+        current_savings=current_savings,
     )
 
 
@@ -43,6 +53,27 @@ class AvalancheVsSnowballTests(unittest.TestCase):
         state = _state(debts, income=3000, expenses=1000)
         av = avalanche.run(state.debts, state.budget, state)
         self.assertLess(av.metrics["months_to_payoff"], 36)
+
+
+class NegativeAmortizationTests(unittest.TestCase):
+    def test_urgent_when_minimum_below_monthly_interest(self):
+        # $5000 at 24% APR -> ~$100/mo interest. A $50 min doesn't cover it.
+        debts = [Debt(name="runaway", kind="credit_card",
+                      balance=5000, apr=0.24, min_payment=50,
+                      credit_limit=10000)]
+        state = _state(debts, income=4000, expenses=2000)
+        result = budget_strategy.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.URGENT)
+        self.assertIn("runaway", result.summary)
+        self.assertGreaterEqual(result.metrics["underwater_debts"], 1)
+
+    def test_not_flagged_when_minimum_covers_interest(self):
+        # $5000 at 6% -> $25/mo interest. A $150 min comfortably covers it.
+        debts = [Debt(name="ok", kind="student_loan",
+                      balance=5000, apr=0.06, min_payment=150)]
+        state = _state(debts, income=4000, expenses=2000)
+        result = budget_strategy.run(state.debts, state.budget, state)
+        self.assertNotEqual(result.severity, Severity.URGENT)
 
 
 class NegativeCashflowTests(unittest.TestCase):
@@ -100,8 +131,63 @@ class ConsolidationTests(unittest.TestCase):
         self.assertEqual(result.severity, Severity.GOOD)
 
 
+class EmergencyFundTests(unittest.TestCase):
+    def test_urgent_when_high_apr_and_no_starter_fund(self):
+        debts = [Debt(name="card", kind="credit_card",
+                      balance=3000, apr=0.24, min_payment=75, credit_limit=5000)]
+        state = _state(debts, current_savings=0.0)
+        result = emergency_fund.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.URGENT)
+
+    def test_warn_when_below_starter_without_high_apr(self):
+        debts = [Debt(name="auto", kind="auto",
+                      balance=5000, apr=0.04, min_payment=150)]
+        state = _state(debts, current_savings=200.0)
+        result = emergency_fund.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.WARN)
+
+    def test_good_once_three_months_covered(self):
+        debts = [Debt(name="auto", kind="auto",
+                      balance=5000, apr=0.04, min_payment=150)]
+        # 3 * (3000 expenses + 150 min) = 9,450
+        state = _state(debts, current_savings=10_000.0)
+        result = emergency_fund.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.GOOD)
+
+    def test_fully_funded_at_six_months(self):
+        debts: list = []
+        state = _state(debts, current_savings=50_000.0)
+        result = emergency_fund.run(state.debts, state.budget, state)
+        self.assertEqual(result.severity, Severity.GOOD)
+        self.assertGreaterEqual(result.metrics["months_covered"], 6)
+
+
+class LongTermTests(unittest.TestCase):
+    def test_stage_1_when_no_starter_fund(self):
+        debts = [Debt(name="card", kind="credit_card",
+                      balance=500, apr=0.18, min_payment=25, credit_limit=5000)]
+        state = _state(debts, current_savings=0.0)
+        result = long_term.run(state.debts, state.budget, state)
+        self.assertEqual(result.metrics["stage"], 1.0)
+
+    def test_stage_2_with_starter_fund_and_high_apr(self):
+        debts = [Debt(name="card", kind="credit_card",
+                      balance=3000, apr=0.24, min_payment=75, credit_limit=5000)]
+        state = _state(debts, current_savings=1500.0)
+        result = long_term.run(state.debts, state.budget, state)
+        self.assertEqual(result.metrics["stage"], 2.0)
+
+    def test_stage_4_when_fully_funded_and_no_high_apr(self):
+        debts = [Debt(name="mortgage", kind="mortgage",
+                      balance=100000, apr=0.035, min_payment=600)]
+        state = _state(debts, current_savings=50000.0)
+        result = long_term.run(state.debts, state.budget, state)
+        self.assertEqual(result.metrics["stage"], 4.0)
+        self.assertEqual(result.severity, Severity.GOOD)
+
+
 class ReportTests(unittest.TestCase):
-    def test_run_all_produces_five_results(self):
+    def test_run_all_produces_seven_results(self):
         debts = [
             Debt(name="Card", kind="credit_card",
                  balance=4000, apr=0.25, min_payment=100, credit_limit=5000),
@@ -110,7 +196,7 @@ class ReportTests(unittest.TestCase):
         ]
         state = _state(debts)
         report = run_all(state)
-        self.assertEqual(len(report.results), 5)
+        self.assertEqual(len(report.results), 7)
         self.assertTrue(report.next_best_action)
 
     def test_empty_state_has_action(self):

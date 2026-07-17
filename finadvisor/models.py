@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+from datetime import date
 from typing import Any
 
 
@@ -11,6 +12,47 @@ DEBT_KINDS = (
     "auto",
     "mortgage",
     "personal",
+    "other",
+)
+
+
+# Primary financial goals the advisor can optimize around. The user
+# picks one on the Dashboard; every recommendation (debt split,
+# savings cap, cut order) is weighted by this choice.
+PRIMARY_GOALS = (
+    "pay_off_debt",     # avalanche-first, minimal savings beyond $1k starter
+    "build_savings",    # 6-mo emergency fund before extra debt paydown
+    "balanced",         # split surplus 50/50 between debt and savings
+)
+
+
+# How loud / specific the advisor should be. "Prescriptive" shows exact
+# dollar amounts and categorical cut targets. "Directional" keeps hints
+# in % and ranges. "Both" mixes the two — the default.
+GUIDANCE_STYLES = ("both", "prescriptive", "directional")
+
+
+# Spending categories are a closed set so the UI can render consistent
+# colors and the trend view can diff them across months.
+SPENDING_CATEGORIES = (
+    "income",
+    "transfer",
+    "debt_payment",
+    "groceries",
+    "dining",
+    "gas",
+    "auto",
+    "shopping",
+    "home",
+    "utilities",
+    "phone_internet",
+    "insurance",
+    "healthcare",
+    "entertainment",
+    "subscriptions",
+    "travel",
+    "fees",
+    "cash",
     "other",
 )
 
@@ -110,18 +152,175 @@ class Budget:
 
 
 @dataclass
+class Account:
+    """A bank / credit-card account that transactions are posted to.
+
+    `name` is what the user sees (e.g. "USAA Checking 3904"). `kind`
+    drives sign interpretation: for checking/savings a positive amount
+    is a deposit, for credit_card a positive amount is a payment.
+    """
+
+    name: str
+    kind: str = "checking"  # "checking" | "savings" | "credit_card"
+    institution: str = ""
+    number_hint: str = ""   # last-4 or truncated number for display only
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Account":
+        return cls(
+            name=d["name"],
+            kind=d.get("kind", "checking"),
+            institution=d.get("institution", ""),
+            number_hint=d.get("number_hint", ""),
+        )
+
+
+@dataclass
+class Transaction:
+    """A single posted line from a statement.
+
+    `amount` follows an income-positive convention: deposits and
+    credits are positive, debits/purchases are negative. `date` is
+    stored as ISO YYYY-MM-DD so month grouping is trivial.
+    """
+
+    date: str          # ISO "YYYY-MM-DD"
+    account: str       # matches Account.name
+    description: str
+    amount: float      # signed: + = money in, - = money out
+    category: str = "other"
+    source: str = ""   # filename or "pasted"
+    note: str = ""     # optional user annotation
+    # True when the importer couldn't confidently categorize this row —
+    # surfaces as a "to do" so the user can review and correct it.
+    needs_review: bool = False
+
+    def __post_init__(self) -> None:
+        if self.category not in SPENDING_CATEGORIES:
+            raise ValueError(
+                f"Unknown category {self.category!r}. "
+                f"Must be one of: {', '.join(SPENDING_CATEGORIES)}."
+            )
+        # Sanity-check the date but don't mutate — callers pass ISO.
+        try:
+            date.fromisoformat(self.date)
+        except ValueError as e:
+            raise ValueError(f"Transaction date must be ISO YYYY-MM-DD: {e}")
+
+    @property
+    def month(self) -> str:
+        """e.g. '2026-02' — useful for grouping."""
+        return self.date[:7]
+
+    @property
+    def is_expense(self) -> bool:
+        return self.amount < 0
+
+    @property
+    def is_income(self) -> bool:
+        return self.amount > 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Transaction":
+        return cls(
+            date=d["date"],
+            account=d["account"],
+            description=d.get("description", ""),
+            amount=float(d["amount"]),
+            category=d.get("category", "other"),
+            source=d.get("source", ""),
+            note=d.get("note", ""),
+            needs_review=bool(d.get("needs_review", False)),
+        )
+
+
+@dataclass
+class CategoryRule:
+    """User-defined override mapping a description substring to a
+    category. Applied at import time (after the built-in regex rules)
+    so the same merchant never needs relabelling twice."""
+
+    match: str        # lowercased substring of a transaction description
+    category: str
+
+    def __post_init__(self) -> None:
+        cleaned = (self.match or "").strip().lower()
+        if not cleaned:
+            raise ValueError("CategoryRule.match cannot be empty.")
+        self.match = cleaned
+        if self.category not in SPENDING_CATEGORIES:
+            raise ValueError(
+                f"Unknown category {self.category!r}. "
+                f"Must be one of: {', '.join(SPENDING_CATEGORIES)}."
+            )
+
+    def matches(self, description: str) -> bool:
+        return bool(description) and self.match in description.lower()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "CategoryRule":
+        return cls(
+            match=str(d.get("match", "")),
+            category=str(d.get("category", "other")),
+        )
+
+
+@dataclass
 class FinanceState:
-    """The complete persisted state: all debts plus a single budget."""
+    """The complete persisted state: debts, budget, accounts, transactions."""
 
     debts: list[Debt] = field(default_factory=list)
     budget: Budget = field(default_factory=Budget)
     consolidation_apr: float = 0.09  # configurable assumption for recommendations
+    current_savings: float = 0.0  # liquid emergency fund balance
+    accounts: list[Account] = field(default_factory=list)
+    transactions: list[Transaction] = field(default_factory=list)
+    category_rules: list[CategoryRule] = field(default_factory=list)
+    household_size: int = 1
+    primary_goal: str = "pay_off_debt"
+    guidance_style: str = "both"
+
+    def __post_init__(self) -> None:
+        if self.current_savings < 0:
+            raise ValueError(
+                f"current_savings cannot be negative (got {self.current_savings})."
+            )
+        if self.household_size < 1:
+            raise ValueError(
+                f"household_size must be >= 1 (got {self.household_size})."
+            )
+        if self.primary_goal not in PRIMARY_GOALS:
+            raise ValueError(
+                f"Unknown primary_goal {self.primary_goal!r}. "
+                f"Must be one of: {', '.join(PRIMARY_GOALS)}."
+            )
+        if self.guidance_style not in GUIDANCE_STYLES:
+            raise ValueError(
+                f"Unknown guidance_style {self.guidance_style!r}. "
+                f"Must be one of: {', '.join(GUIDANCE_STYLES)}."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "debts": [d.to_dict() for d in self.debts],
             "budget": self.budget.to_dict(),
             "consolidation_apr": self.consolidation_apr,
+            "current_savings": self.current_savings,
+            "accounts": [a.to_dict() for a in self.accounts],
+            "transactions": [t.to_dict() for t in self.transactions],
+            "category_rules": [r.to_dict() for r in self.category_rules],
+            "household_size": self.household_size,
+            "primary_goal": self.primary_goal,
+            "guidance_style": self.guidance_style,
         }
 
     @classmethod
@@ -130,6 +329,18 @@ class FinanceState:
             debts=[Debt.from_dict(x) for x in d.get("debts", [])],
             budget=Budget.from_dict(d.get("budget", {})),
             consolidation_apr=float(d.get("consolidation_apr", 0.09)),
+            current_savings=float(d.get("current_savings", 0.0)),
+            accounts=[Account.from_dict(x) for x in d.get("accounts", [])],
+            transactions=[
+                Transaction.from_dict(x) for x in d.get("transactions", [])
+            ],
+            category_rules=[
+                CategoryRule.from_dict(x)
+                for x in d.get("category_rules", [])
+            ],
+            household_size=int(d.get("household_size", 1)),
+            primary_goal=str(d.get("primary_goal", "pay_off_debt")),
+            guidance_style=str(d.get("guidance_style", "both")),
         )
 
     def total_debt(self) -> float:
@@ -140,3 +351,30 @@ class FinanceState:
         if total <= 0:
             return 0.0
         return sum(d.balance * d.apr for d in self.debts) / total
+
+    def upsert_account(self, account: Account) -> None:
+        """Add an account, or update the record if one by the same name
+        already exists. Idempotent so repeated imports don't duplicate."""
+        for i, existing in enumerate(self.accounts):
+            if existing.name == account.name:
+                self.accounts[i] = account
+                return
+        self.accounts.append(account)
+
+    def add_transactions(self, txs: list[Transaction]) -> int:
+        """Append transactions, skipping any (date, account, amount,
+        description) duplicates of rows already on file. Returns the
+        number newly inserted."""
+        seen = {
+            (t.date, t.account, round(t.amount, 2), t.description)
+            for t in self.transactions
+        }
+        added = 0
+        for t in txs:
+            key = (t.date, t.account, round(t.amount, 2), t.description)
+            if key in seen:
+                continue
+            self.transactions.append(t)
+            seen.add(key)
+            added += 1
+        return added
